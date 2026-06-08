@@ -1,0 +1,792 @@
+﻿# DOCUMENTO DE ESPECIFICACIONES TÉCNICAS COMPLETO
+## BOT DE TRADING ALGORÍTMICO — BTC/USDC PERPETUO
+
+
+---
+
+
+## SECCIÓN 1: CONFIGURACIÓN BASE Y CONTEXTO GENERAL
+
+
+El bot opera en el par BTC/USDC perpetuo en Binance Futuros, comenzando en el entorno de testnet de Binance Futuros (https://testnet.binancefuture.com) y migrando a producción real únicamente cuando el sistema haya demostrado rentabilidad consistente en backtesting e historial de testnet. El tipo de margen es configurable en vivo entre aislado y cruzado, lo cual es importante porque el margen aislado limita la pérdida máxima al margen asignado a esa posición mientras que el cruzado usa todo el balance como margen, siendo el aislado más seguro para este sistema. El símbolo exacto en la API es BTCUSDC. La URL base de la API de futuros de testnet es https://testnet.binancefuture.com y la de producción es https://fapi.binance.com. El WebSocket para precio en tiempo real es wss://stream.binancefuture.com/ws/btcusdc@aggTrade.
+
+
+El sistema opera únicamente una posición abierta a la vez con el 100% del capital disponible. Esto se debe a que con múltiples posiciones simultáneas el riesgo se multiplica y con apalancamiento se vuelve difícil de controlar. El capital base para las simulaciones y el bot inicial es de 100 USDC, aunque este valor es configurable.
+
+
+Las comisiones de Binance Futuros para órdenes maker son 0% y para taker son 0.05% por lado. El sistema siempre apunta a ejecutar como maker usando órdenes con timeInForce GTX (Post-Only), que garantiza que si la orden no puede ejecutarse como maker es rechazada en vez de ejecutarse como taker. Sin embargo, el sistema siempre calcula el peor escenario contemplando comisión taker en ambos lados (0.10% total) para que si ocurre una ejecución taker el resultado siga siendo rentable y no quede en pérdida.
+
+
+---
+
+
+## SECCIÓN 2: APALANCAMIENTO POR NIVEL DE SEÑAL
+
+
+El apalancamiento no es fijo sino que varía según la calidad de la señal detectada. Esta decisión se tomó porque aplicar el mismo apalancamiento a señales débiles y fuertes es ineficiente: las señales fuertes merecen más exposición y las débiles deben proteger más el capital. El sistema define tres niveles: Nivel 1 para señales fuertes usa apalancamiento x5, Nivel 2 para señales moderadas con confirmación macro usa x3, y Nivel 3 para señales débiles pero con confluencia macro muy fuerte usa x2. Cuando hay divergencia entre la tendencia diaria y la semanal, el apalancamiento se reduce al 60% del nivel correspondiente como medida de precaución adicional. Todos los porcentajes de TP y SL se expresan siempre sobre el capital total, no sobre el tamaño de la posición, porque lo que le importa al trader es cuánto pierde o gana de su capital real, no del tamaño apalancado.
+
+
+---
+
+
+## SECCIÓN 3: MODOS DE OPERACIÓN
+
+
+El bot tiene tres modos que funcionan simultáneamente en el mismo proceso y se evalúan en paralelo para cada ciclo. El sistema determina cuál modo tiene más posibilidades en ese momento y prioriza ese. Los modos se pueden activar y desactivar individualmente mediante comandos de terminal sin reiniciar el bot.
+
+
+El modo Scalp usa el timeframe de 15 minutos como principal y el de 5 minutos como confirmación. El take profit aproximado es 0.6% sobre capital y el stop loss aproximado es 0.4% sobre capital, con un ratio de 1.5:1. El trailing stop tiene distancia de 0.25-0.3% y se activa cuando el precio avanzó 0.3% desde la entrada y velas de 3 minutos confirman soporte. Se evalúa cada 60 segundos.
+
+
+El modo Mediano usa 1 hora como principal y 15 minutos como confirmación. TP aproximado 1% y SL 0.5% sobre capital, ratio 2:1. El trailing stop tiene distancia de 0.4-0.5% y se activa cuando velas de 5 o 15 minutos confirman soporte. Se evalúa cada 5 minutos.
+
+
+El modo Swing usa 4 horas como principal y 1 hora como confirmación. TP aproximado 2.5% y SL 0.8% sobre capital, ratio 3:1. El trailing stop tiene distancia de 1-2% y se activa cuando velas de 15 minutos a 1 hora confirman soporte. Se evalúa cada 15 minutos.
+
+
+Es fundamental aclarar que estos valores de TP y SL no son fijos absolutos sino aproximados. El sistema evalúa dónde colocarlos en cada operación según las EMAs próximas en el camino, los niveles de pivote, la volatilidad expresada en ATR y el momentum del momento de entrada. Esta flexibilidad es importante porque el mercado no respeta rangos fijos y los niveles dinámicos mejoran significativamente la tasa de éxito.
+
+
+---
+
+
+## SECCIÓN 4: SISTEMA DE PUNTAJE PONDERADO CONTINUO
+
+
+Este es el núcleo del sistema de toma de decisiones. En lugar de condiciones binarias (el indicador cumple o no cumple), cada indicador suma puntos de forma gradual según su intensidad. La razón de este enfoque es que la realidad del mercado es continua: un RSI en 15 es mucho más significativo que uno en 29, y un sistema que trata ambos igual desperdicia información valiosa. El puntaje máximo teórico es de aproximadamente 141 puntos. La entrada se dispara cuando el puntaje total supera un umbral porcentual del máximo, y ese umbral varía según el nivel de señal.
+
+
+**RSI — máximo 12 puntos.** El RSI mide el momentum de precio comparando ganancias y pérdidas en un período. Los valores extremos indican sobrecompra o sobreventa. Para operaciones long: RSI menor a 15 suma 12 puntos (caso extremo muy raro que suele preceder rebotes importantes), RSI menor a 20 suma 10 puntos, RSI menor a 30 suma 8 puntos, RSI entre 30 y 40 suma 4 puntos indicando zona de recuperación, RSI entre 40 y 50 suma 1 punto. El momentum del RSI, es decir si viene bajando desde más de 50 en tres velas consecutivas, suma 3 puntos extra porque indica que la presión vendedora está agotándose. RSI mayor a 70 sin confirmación macro resta 4 puntos porque puede lateralizar en vez de corregir. Condición crítica: si el RSI está saturado (mayor a 70 o menor a 30) Y las EMAs están completamente alineadas, el bot NO opera porque probablemente va a lateralizar para enfriar. El RSI saturado puede mantenerse muchas velas y lateralizar por tiempo antes de continuar, lo cual es una trampa clásica. Esto debe confirmarse con tendencia macro antes de considerar entrada.
+
+
+**EMAs — máximo 13 puntos.** Las cinco EMAs usadas son la de 7, 25, 50, 99 y 200 períodos. Cuando todas están alineadas en la misma dirección suma 10 puntos, cuatro de cinco alineadas suma 6 puntos, tres de cinco suma 3 puntos. La separación creciente entre EMAs, que indica tendencia acelerando, suma 3 puntos adicionales. La compresión de EMAs, cuando la EMA7 y la EMA25 están separadas menos de 0.1% entre sí, suma 4 puntos SOLO si el Squeeze Momentum está terminando o el volumen está creciendo simultáneamente. Sola no suma nada porque una compresión de EMAs sin contexto puede explotar hacia cualquier dirección. Condición especial sobre compresión con goteo: si hay compresión y 2 o más velas goteando hacia un lado, se debe esperar el cierre de una vela fuera de la compresión. Si la siguiente vela vuelve hacia las EMAs hay que evaluar la fuerza. Si atraviesa con mucha fuerza (más de 0.8 veces el ATR) puede rebotar en la EMA. Si atraviesa débilmente puede continuar o lateralizar. La cantidad de velas de goteo necesarias para confirmar depende del grado de compresión: mayor compresión requiere menos velas porque el rango es más estrecho y cualquier movimiento es más significativo. Dentro de una compresión se pueden hacer mini operaciones a favor del timeframe inmediatamente superior si hay tendencia fuerte, sabiendo que incluso con macro bajista puede haber un rally temporal de varias velas alcistas antes de continuar la baja general.
+
+
+**MACD — máximo 14 puntos.** El MACD mide la diferencia entre dos EMAs y su velocidad de cambio, siendo útil para confirmar momentum pero no dominante como indicador único. Un cruce alcista activo (la línea MACD cruzando la señal hacia arriba) suma 8 puntos. El histograma positivo y creciendo suma 5 puntos. El histograma positivo pero achicándose suma 2 puntos. La divergencia alcista, que ocurre cuando el precio hace mínimos más bajos pero el MACD hace mínimos más altos mirando 10 velas atrás, suma 6 puntos adicionales porque es una señal poderosa de que la bajada está perdiendo fuerza y viene reversión.
+
+
+**UT Bot — máximo 8 puntos.** El UT Bot es un trailing stop dinámico basado en ATR que genera señales cuando el precio lo cruza. Una señal de cruce activa suma 8 puntos. El precio sobre el trailing stop y acercándose a menos de 0.2% suma 3 puntos como confirmación de tendencia. Es fundamental tomarlo con pinzas: si la señal del UT Bot va contra la tendencia macro, su puntaje se reduce a la mitad. Siempre se deben requerir más indicadores que avalen la señal si va contra tendencia. Hay que esperar ligeramente antes de actuar solo en base al UT Bot porque puede dar señales erróneas en mercados sin tendencia clara.
+
+
+**Squeeze Momentum de LazyBear — máximo 10 puntos.** Los parámetros usados son key value 1 y ATR period 10. El squeeze terminando (sqz_off, cuando las Bandas de Bollinger salen de los Canales de Keltner) suma 8 puntos porque es el mejor momento para entrar: el mercado estaba comprimido y acaba de liberar energía. El histograma positivo creciendo suma 5 puntos. El cambio de verde claro a verde oscuro o de rojo claro a rojo oscuro en el histograma suma 3 puntos y es importante porque indica agotamiento de tendencia o cambio inminente, no necesariamente en el cruce sino en ese cambio de intensidad. El squeeze activo (mercado comprimido) resta 3 puntos porque indica mercado sin dirección. El peso del Squeeze es moderado-alto pero no dominante.
+
+
+**Ichimoku — máximo 9 puntos.** El Ichimoku es un sistema japonés completo que muestra soporte, resistencia y tendencia en una sola visualización. Es respetado por traders asiáticos e institucionales. El precio sobre la nube suma 5 puntos. El cruce de la línea de conversión sobre la línea base suma 4 puntos adicionales. El precio dentro de la nube resta 2 puntos porque indica zona de indecisión. Se le da peso moderado.
+
+
+**VWAP — máximo 5 puntos.** El VWAP es el precio promedio ponderado por volumen del día y es la referencia de precio "justo" que usan los traders institucionales. Cuando el precio está sobre el VWAP el mercado es alcista según los institucionales, cuando está abajo es bajista. Precio sobre VWAP suma 3 puntos. Si el precio cruza el VWAP al alza en esa misma vela suma 5 puntos porque es una señal fresca de cambio de sesgo institucional. Peso moderado.
+
+
+**Volumen — máximo 8 puntos.** El volumen confirma que los movimientos de precio tienen respaldo real. Volumen mayor a 2 veces el promedio de 20 velas suma 8 puntos. Mayor a 1.5 veces suma 5 puntos. Mayor a 1.2 veces suma 3 puntos. Volumen menor al promedio resta 2 puntos porque un movimiento sin volumen puede ser falso.
+
+
+**Bollinger Bands — máximo 6 puntos.** Miden la volatilidad y la posición relativa del precio en su rango estadístico reciente. El precio tocando la banda inferior en long o superior en short suma 6 puntos porque estadísticamente el precio tiende a volver al centro. Precio en el tercio inferior o superior suma 3 puntos. Precio sobreextendido en la dirección contraria (precio por encima de la banda superior en long) resta 4 puntos porque indica que el precio ya viajó demasiado y es arriesgado entrar.
+
+
+**Tendencia Macro — máximo 15 puntos.** La confluencia de los timeframes 1W, 1D y 4H es el factor más poderoso del sistema. Cuando los tres están alineados en la misma dirección suma 15 puntos. Solo 1W y 1D alineados suma 10 puntos. Solo el diario suma 4 puntos. La macro completamente en contra resta 8 puntos. Es crítico entender que los timeframes altos no bloquean la entrada pero ponderan enormemente el puntaje. La condición especial de divergencia diaria versus macro semanal: si el 1W dice una dirección y el 1D dice otra, el bot entra solo en scalps con puntaje alto, el apalancamiento se reduce al 60% del nivel correspondiente, y se requiere 15% más de puntaje. Con dos timeframes confirmando la dirección contraria hay un poco más de confirmación pero hay que recordar que en cualquier momento puede volver a la tendencia macro principal. Operar en esas velas contrarias solo es aceptable para scalps muy seguros.
+
+
+**Pivotes Estándar Mejorados — máximo 5 puntos.** Los pivotes se calculan con el OHLC de la vela anterior y generan niveles de soporte (S1, S2, S3) y resistencia (R1, R2, R3). El precio rebotando en S1 para long o R1 para short suma 5 puntos. Cerca de S2 o R2 suma 4 puntos. Entre el pivot y S1 suma 2 puntos.
+
+
+**Funding Rate — máximo 4 puntos, direccional.** El funding rate en perpetuos se cobra cada 8 horas y es la diferencia de sentimiento entre longs y shorts. Si es positivo, los longs pagan a los shorts, lo cual indica que el mercado está muy largo y puede estar sobreextendido hacia arriba (favorable para short, desfavorable para long). Si es negativo, los shorts pagan a los longs, indicando mercado muy corto (favorable para long, desfavorable para short). Para long: funding menor a -0.01% suma 4 puntos, menor a -0.005% suma 2 puntos, mayor a +0.01% resta 3 puntos. Para short: inverso exacto. Esto es importante para no entrar long justo antes de que se cobre un funding muy positivo que coma la ganancia.
+
+
+**Order Book Imbalance — máximo 4 puntos.** Es la diferencia entre el volumen de órdenes de compra y venta en el libro de órdenes en tiempo real. Si hay más dinero queriendo comprar que vender el precio tiende a subir. Imbalance mayor a 30% hacia compras suma 4 puntos para long, mayor a 15% suma 2 puntos. Más útil para scalp que para swing porque cambia rápidamente.
+
+
+**Patrones de Velas — máximo 8 puntos en scalp, 12 en swing.** Se duplica si coincide con soporte o resistencia. La vela envolvente alcista o bajista suma 6 puntos multiplicado por el peso del timeframe. El martillo o estrella fugaz suma 5 puntos. El doji en soporte o resistencia suma 4 puntos. El peso del timeframe es 1.0 para 15 minutos y 1.5 para 1 hora o más, porque los patrones de velas son más confiables en timeframes altos donde hay menos ruido. Honestamente tienen peso moderado-bajo en scalp.
+
+
+**Volatilidad Tick a Tick con velas de 1M — máximo 6 puntos.** Se usan velas de 1 minuto para mayor precisión tanto en la detección de señales en rango como en la simulación de cuándo se ejecutan el TP y el SL. Precio rebotando en rango con volatilidad suma 2 a 6 puntos según la cantidad de rebotes. También se usa para detectar oportunidades de scalp dentro de rangos definidos.
+
+
+**CCI — máximo 4 puntos.** El CCI mide qué tan lejos está el precio de su promedio estadístico. Salida de zona sobreextendida (cruce de ±100) suma 3 puntos. CCI mayor a 150 o menor a -150 suma 2 puntos como señal de impulso. Penalización de 2 puntos si está en dirección opuesta.
+
+
+**Estocástico — máximo 4 puntos.** Compara el precio de cierre con el rango de las últimas N velas. Cruce de K sobre D en zona menor a 20 para long o mayor a 80 para short suma 3 puntos. Zona extrema sin cruce aún suma 2 puntos.
+
+
+**Divergencia MACD como componente separado — máximo 6 puntos.** Analiza 10 velas atrás y detecta si el precio hace extremos más extremos pero el MACD no los acompaña, lo cual indica que el movimiento está perdiendo fuerza y viene una reversión. Es una señal poderosa cuando aparece.
+
+
+**Lateralización por Tipo de Velas + RSI + Máximos y Mínimos.** Este componente evalúa la probabilidad de que el mercado vaya a lateralizar. Los dojis suman 0.25 al score de lateralización, las mechas largas en ambos lados suman 0.20, el RSI entre 45 y 55 suma 0.30, los máximos y mínimos convergentes en las últimas 5 velas suman 0.35. Si el score de lateralización supera 0.65 el bot no opera a menos que haya confluencia macro muy fuerte. Esta lógica existe porque el tipo de velas combinado con el RSI neutro y los rangos estrechándose son señales claras de que el mercado está indeciso y entrar ahí tiene alta probabilidad de quedar atrapado.
+
+
+---
+
+
+## SECCIÓN 5: UMBRALES DE ENTRADA Y OPTIMIZACIÓN
+
+
+Los umbrales se expresan como porcentaje del puntaje máximo de 141 puntos y son el parámetro más importante a optimizar. El Nivel 1 entra cuando el puntaje es aproximadamente 55-60% del máximo (77-85 puntos), siempre, con apalancamiento x5. El Nivel 2 entra con aproximadamente 42-48% del máximo más confirmación macro, con apalancamiento x3. El Nivel 3 entra con 32-38% del máximo pero requiere que 1W y 1D estén muy alineados, usa apalancamiento x2, TP reducido a 0.1-0.2% y tiene máximo 2 intentos fallidos antes de desactivarse. En horarios de cautela el umbral se incrementa automáticamente: apertura Wall Street 13:30 UTC requiere 10% más, cierre de semana viernes 21:00 UTC requiere 10% más, horario sin volumen pero tendencia fuerte requiere solo 5% más, cierre de día 23:00 UTC requiere 5% más. El optimizer prueba estas variables en combinación para encontrar la configuración óptima histórica.
+
+
+---
+
+
+## SECCIÓN 6: GESTIÓN DE ÓRDENES COMPLETA
+
+
+**Entrada.** Siempre se usa limit maker con GTX. Si el precio sube más de 0.5% sin ejecutar la orden Y los indicadores siguen fuertes, se busca un nuevo precio de entrada en lugar de cancelar. Si el precio sube más de 0.5% Y los indicadores se debilitaron, se cancela. Si lateraliza dos velas del timeframe principal sin ejecutar Y los indicadores ya no son claros, se cancela. Si sube entre 0.1% y 0.5% y vuelve, se mantiene la orden esperando el retesteo.
+
+
+**Cierre TP.** Se colocan tres órdenes limit maker escalonadas simultáneamente. Si el TP no se ejecuta y el precio retrocede, el trailing stop captura la ganancia. Cuando el precio llega al TP y rebota en lugar de romper, el trailing stop apretado captura la ganancia sin cerrar prematuramente si el precio continúa subiendo.
+
+
+**Cierre SL.** Se usa STOP_MARKET para garantizar ejecución antes de llegar a la liquidación. La lógica del SL es inteligente: si la posición está en rojo pero la tendencia que validó la entrada sigue siendo muy fuerte y muchos indicadores siguen alineados, puede mantenerse porque quizás recupera. Si el rojo es profundo Y la tendencia claramente cambió, cierra a market. El objetivo es evitar quedarse atrapado en una operación que liquide el capital. Esta lógica aplica principalmente para operaciones de nivel 1 con señales muy fuertes que quizás entraron en mal timing pero la tendencia es válida. Hay que ser muy cuidadoso de no esperar recuperaciones que no llegan: si las EMAs empezaron a cruzar en la dirección opuesta o el MACD cruzó claramente en contra, es señal de que hay que salir.
+
+
+**Señal contraria con posición abierta.** Se intenta cerrar primero con limit maker. Si la orden limit desaparece (el precio se fue de ese nivel) o los indicadores de las velas inmediatas muestran riesgo real de cambio de tendencia definitivo, se cierra a market. Si el precio retrocede y los indicadores de las siguientes velas inmediatas muestran continuidad de la señal contraria, se cierra a market.
+
+
+---
+
+
+## SECCIÓN 7: CIERRE PARCIAL EN EMAS INTERMEDIAS
+
+
+El bot identifica la próxima EMA en el camino hacia el TP y evalúa cuántos toques históricos tiene en las últimas 30 velas como indicador de su fuerza como soporte o resistencia. La lógica de cuánto cerrar combina la fuerza del soporte con la fuerza de la ruptura. Ruptura fuerte con soporte fuerte (4+ toques) cierra 30% y espera porque es probable rebote hacia la EMA. Ruptura fuerte con soporte débil cierra solo 15% dejando correr porque puede seguir. Ruptura moderada con soporte fuerte cierra 50%. Ruptura moderada con soporte moderado cierra 35%. Ruptura moderada sin soporte cierra 20%. Ruptura débil con soporte fuerte cierra 60% porque hay alta probabilidad de rebote. La resistencia mínima o máxima también puede ser superada, por eso se espera confirmación de indicadores antes de cerrar agresivamente, asegurando siempre un mínimo de cierre por si rebota antes de poder reaccionar. Al hacer cualquier cierre parcial, el SL se mueve inmediatamente al precio de breakeven considerando las comisiones de ambos lados, lo cual garantiza que en el peor caso la operación sale en cero.
+
+
+---
+
+
+## SECCIÓN 8: TRAILING STOP
+
+
+El trailing stop no se activa solo por porcentaje de avance sino también por confirmación de estructura de soporte en velas cortas del timeframe inferior. Para scalp son velas de 3 minutos. Para mediano son velas de 5 o 15 minutos. Para swing son velas de 15 minutos a 1 hora. Las distancias aproximadas son 0.25-0.3% para scalp, 0.4-0.5% para mediano, y 1-2% para swing. En lateral consolidado con RSI saturado se activa un SL dinámico automático, especialmente en swings, que sube el SL conforme el precio se aleja usando 1.5 veces el ATR como referencia para no quedar atrapado en una lateralización que consuma la ganancia.
+
+
+---
+
+
+## SECCIÓN 9: GESTIÓN DE RIESGO
+
+
+Tres pérdidas consecutivas generan una pausa de 20 velas del timeframe principal del modo afectado, no del bot global. Es decir, si scalp tiene 3 pérdidas seguidas se pausa solo el modo scalp por 20 velas de 15 minutos, que son 5 horas. El motivo es que 3 pérdidas consecutivas en el mismo modo indica que el mercado no está respondiendo a las señales de ese timeframe y conviene esperar a que las condiciones cambien. Cinco pérdidas totales en el mismo día generan pausa hasta medianoche UTC (equivalente a las 9pm hora Argentina) porque es una señal de que el día completo no es favorable para operar. Una señal con 75% o más del puntaje máximo puede romper la pausa, pero no resetea el contador de pérdidas. Si esa operación de excepción pierde, el contador sigue acumulando normalmente. El reseteo completo de todos los contadores ocurre a medianoche UTC cada día.
+
+
+**Detección de falla sistémica del bot.** Si el winrate de las últimas 20 operaciones cae por debajo del 38%, el bot entra en modo revisión: sigue calculando indicadores y registrando qué operaciones hubiera hecho, pero no ejecuta nada (paper trading). Este modo dura 30 días. Al final se revisa si hubiera sido rentable para determinar si los indicadores dejaron de funcionar porque el mercado cambió su estructura. Este es un riesgo real: los mercados evolucionan y los indicadores que funcionaban pueden dejar de hacerlo durante meses o permanentemente. Es mejor pausar, revisar y adaptar que seguir perdiendo capital mientras el sistema está desalineado con el mercado actual. Cuando entra en modo revisión el bot envía alerta por Telegram.
+
+
+---
+
+
+## SECCIÓN 10: NOTICIAS Y GEOPOLÍTICA
+
+
+El bot se conecta a múltiples fuentes de información en tiempo real. CryptoPanic requiere token gratuito y provee noticias cripto con votos de impacto de la comunidad. Alternative.me provee el Fear & Greed Index (0-100) sin clave. Messari provee noticias y datos con free tier. Los RSS de CoinTelegraph y CoinDesk proveen noticias sin necesidad de clave. Se revisan cada 5 minutos en el bot en vivo. En backtest se desactiva porque no hay datos históricos de noticias disponibles para simular. La lógica de pausa por noticias combina el Fear & Greed con el impacto de las noticias de CryptoPanic. Fear & Greed entre 25 y 75 es normal sin cambios. Entre 15-85 o noticias de impacto moderado genera pausa de 15 minutos y requiere 15% más de puntaje. Menor a 20 o mayor a 80 o noticias de alto impacto genera pausa de 60 minutos. Menor a 10 o mayor a 90 o noticias extremas genera pausa de 4 horas. Para noticias de guerra o conflicto geopolítico se analiza el comportamiento histórico de BTC ante ese tipo de evento: si BTC reacciona con más de 2% de movimiento se pausa 4 horas, si reacciona menos de 0.5% solo se requiere 10% más de puntaje, si no hay reacción clara se opera con cautela adicional.
+
+
+---
+
+
+## SECCIÓN 11: ANÁLISIS MULTI-TIMEFRAME
+
+
+Los timeframes 1W y 1D son el contexto macro y ponderan enormemente el puntaje. Los de 4H y 1H son el contexto operativo y confirman la dirección. Los de 15M y 5M son los de entrada y disparan la señal. Los timeframes altos no bloquean la entrada pero sí la ponderan. La divergencia entre el diario y el semanal es una condición especial importante: cuando el 1W dice alcista y el 1D dice bajista, se trabaja con mucha precaución porque la tendencia macro puede retomar en cualquier momento. Solo se permiten scalps muy seguros en esa condición, el apalancamiento se reduce al 60% y se requiere 15% más de puntaje. La proyección de EMAs es una función disponible en el menú que calcula matemáticamente dónde estarán las próximas 3 velas proyectadas según el precio actual. Se puede pedir múltiples veces y cada resultado se guarda con timestamp en el log cifrado.
+
+
+---
+
+
+## SECCIÓN 12: SEGURIDAD
+
+
+Las claves API de Binance se guardan cifradas en un archivo separado llamado keys.enc usando cifrado AES. El bot solicita una contraseña al arrancar para descifrar las claves en memoria, nunca en disco legible. La interfaz web local (Flask) requiere esa misma contraseña más un segundo factor de autenticación enviado por Telegram antes de permitir acceso. Cada acceso a la interfaz, incluyendo los del propio usuario, genera una alerta de seguridad por Telegram con la IP del que ingresó. Los permisos de la API de Binance se configuran restringidos a la IP específica del servidor o PC donde corre el bot, de modo que aunque alguien obtenga las claves no pueda usarlas desde otra IP. Las claves nunca aparecen en ningún archivo de código visible. Todo el historial y los logs se guardan cifrados.
+
+
+---
+
+
+## SECCIÓN 13: INTERFAZ Y COMANDOS
+
+
+Los comandos se escriben en la misma terminal donde corre el bot mientras está ejecutándose. El bot corre y al mismo tiempo escucha lo que se escribe. Los comandos disponibles son: `h` para mostrar la lista de comandos, `i` para solicitar informe interactivo que pregunta cuántas operaciones mostrar (5 o 10) y presionando `i` de nuevo cancela la petición, `m` para ver todo el último ciclo completo, `p` para pausar o reanudar el bot completo, `p1` `p2` `p3` para pausar o reanudar cada modo individualmente, `e` para entrada manual donde el bot verifica las condiciones y ejecuta de forma segura, `s` para salida manual segura de la operación actual sin afectar al bot, `1` `2` `3` para activar o desactivar cada modo, `on` para encender el bot, `off` para apagarlo sin cerrar posiciones abiertas, `kill` para apagar cerrando todas las posiciones, `q` para salir del programa. La interfaz web local en Flask permite modificar en vivo cualquier parámetro incluyendo apalancamiento, monto, margen, par de trading y umbrales de indicadores. Los cambios se aplican en el próximo ciclo sin reiniciar el bot y se guardan permanentemente.
+
+
+---
+
+
+## SECCIÓN 14: HISTORIAL Y LOGS
+
+
+El historial guarda absolutamente todo. Los archivos CSV se generan cada 12 horas a las 00:00 UTC y 12:00 UTC. Cada operación registra: timestamp exacto, modo, dirección, resultado (TP/SL/TRAIL), precio de entrada, precio de salida, PNL en porcentaje y en USDC, capital resultante, nivel de entrada, apalancamiento usado, desglose completo del puntaje de cada indicador individual, estado completo del mercado en el momento de entrada y en el momento de salida (precio, todas las EMAs, RSI, MACD, ATR, volumen, etc.), cada comando ejecutado en la terminal, cada cambio de parámetro realizado en la interfaz web, cada proyección de EMAs solicitada con su resultado, cada informe generado. Todo cifrado.
+
+
+---
+
+
+## SECCIÓN 15: NOTIFICACIONES TELEGRAM
+
+
+El bot de Telegram se crea en @BotFather de Telegram de forma gratuita. Genera un token que se pega en la configuración. Las notificaciones incluyen: apertura de cada operación con todos los detalles, cierre de operación con resultado y PNL, activación de pausa, señales muy fuertes detectadas aunque no se opere, entrada en modo revisión por falla sistémica, alertas de seguridad con IP de acceso, y cualquier evento importante del sistema.
+
+
+---
+
+
+## SECCIÓN 16: ARCHIVOS DEL SISTEMA
+
+
+La estructura de archivos es la siguiente. `config.py` contiene todos los parámetros configurables del sistema. `scoring.py` contiene el sistema de puntaje ponderado completo. `indicators.py` contiene el cálculo de todos los indicadores y funciones auxiliares. `backtest_v3.py` es el backtest completo usando datos de 1M para precisión. `orders.py` gestiona todas las órdenes en Binance. `bot.py` es el bot principal con el sistema de comandos de terminal. `telegram_bot.py` gestiona todas las notificaciones. `optimizer_v2.py` corre el backtest con múltiples combinaciones de parámetros para encontrar la configuración óptima. `news_monitor.py` monitorea noticias y el Fear & Greed Index. `keys.enc` almacena las claves cifradas. La carpeta `web_interface/` contiene la interfaz Flask. La carpeta `historial/` contiene todos los CSVs y logs cifrados. Los archivos actualmente completados son config.py, scoring.py, indicators.py y backtest_v3.py. Los pendientes son orders.py, bot.py, telegram_bot.py, optimizer_v2.py, keys.enc, news_monitor.py y la interfaz web.
+
+
+---
+
+
+## SECCIÓN 17: ESTADO Y PRÓXIMOS PASOS
+
+
+El flujo de trabajo es: primero ejecutar el backtest v3 con 1000 días para validar la estrategia base. Segundo, ejecutar el optimizer v2 para encontrar los parámetros óptimos. Tercero, actualizar config.py con los parámetros óptimos y volver a correr el backtest para confirmar. Cuarto, completar los archivos pendientes (orders.py, bot.py, telegram_bot.py). Quinto, configurar Telegram y el sistema de seguridad. Sexto, ejecutar en testnet durante varios días con monitoreo. Séptimo, si el desempeño en testnet es consistente con el backtest, migrar a producción real con capital pequeño. Octavo, cuando funcione bien, conectar TradingView mediante webhooks con los indicadores Squeeze Momentum, UT Bot y Pivotes Estándar, volver a hacer backtest con esa lógica de señales y luego volver a testnet antes de usar en producción.
+
+
+
+
+ya avanzamos en otro chat, esto es lo que ya hicimos y falta por hacer, si queres comprobamos el codigo ejecutando todos los archivos y luego seguimos
+
+
+
+
+resumen de lo que ya hicimos en otro chat y de lo que falta
+Claude ha respondido:
+✅ Hecho
+* market_feed.py — datos live y backtest con la misma interfaz, WebSocket + REST Binance testnet/producción
+* indicators.py — RSI, EMAs 7/25/50/99/200, MACD + divergencia, UT Bot ATR-based, Squeeze Momentum LazyBear, Ichimoku, VWAP, Bollinger, ATR, CCI, Estocástico, Pivotes estándar, patrones de velas, score de lateralización
+* scoring.py — puntaje ponderado continuo ~143pts máx, 3 niveles (N1≥57% x5, N2≥45%+macro x3, N3≥35%+macro fuerte x2), bloqueos automáticos
+* live_monitor.py — loop visual 60s con colores, historial de señales, countdown en línea, log a monitor_log.txt
+* strategy.py — tamaño de posición, SL ajustado por ATR, 3 TPs escalonados ajustados a EMAs, trailing stop, cierre parcial en EMAs intermedias, gestión de riesgo completa (pausas por modo, pausa global, modo revisión con persistencia JSON)
+________________
+
+
+⏳ Por hacer
+* event_bus.py — sistema de eventos para conectar módulos sin dependencias directas
+* config.py — todos los parámetros del sistema en un lugar
+* backtest_v3.py — simulación sobre velas 1M, split train 70% / val 15% / test 15%
+* optimizer_v2.py — prueba combinaciones de parámetros sobre el backtest
+* orders.py — GTX post-only, margen aislado/cruzado, 3 TPs limit maker simultáneos, SL STOP_MARKET
+* bot.py — loop principal con comandos de terminal en vivo
+* telegram_bot.py — notificaciones de operaciones, alertas, modo revisión
+* news_monitor.py — CryptoPanic, Fear & Greed, RSS
+* Seguridad — claves AES cifradas, 2FA Telegram
+* Interfaz Flask — modificar parámetros en vivo
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ESTADO ACTUAL DEL PROYECTO — MÓDULOS Y PENDIENTES
+* Los archivos completados y funcionales son market_feed.py, indicators.py, scoring.py, live_monitor.py, strategy.py y config.py. De estos, scoring.py y strategy.py tienen valores hardcodeados que eventualmente deben reemplazarse por referencias a cfg de config.py, y market_feed.py tiene hardcodeadas las URLs, el símbolo y los intervalos de refresco que también deben migrar a cfg. Esta integración no es urgente — se hace cuando todos los módulos estén construidos y antes de ir a testnet.
+Los archivos pendientes de construir son los siguientes.
+   * backtest_v3.py es la simulación completa sobre velas de 1 minuto con split train 70% / validación 15% / test 15%. Requiere tener el CSV de datos históricos descargado. La descarga de 1000 días tarda varios minutos dependiendo de la conexión. Se puede hacer una prueba rápida con 90 días primero. Este módulo es la prioridad para validar que la estrategia funciona antes de seguir construyendo.
+   * optimizer_v2.py prueba combinaciones de parámetros sobre el backtest para encontrar la configuración óptima. Depende de que backtest_v3.py esté terminado.
+   * orders.py gestiona todas las órdenes contra Binance: GTX post-only, margen aislado o cruzado, tres TPs limit maker simultáneos, SL STOP_MARKET, repricing y cancelación inteligente de entradas.
+   * bot.py es el loop principal con el sistema de comandos de terminal en vivo. Los comandos llaman a cfg.apply_change() con el modo de persistencia elegido por el usuario (session, persistent, permanent) para que cualquier cambio hecho desde la terminal tenga las mismas opciones que desde Flask.
+   * telegram_bot.py gestiona todas las notificaciones: apertura y cierre de operaciones, pausas, señales fuertes aunque no se operen, modo revisión, alertas de seguridad con IP de acceso.
+   * news_monitor.py monitorea CryptoPanic, Fear & Greed Index y RSS de CoinTelegraph y CoinDesk cada 5 minutos.
+   * La interfaz Flask (web_interface/) es la interfaz visual que se abre en el browser en http://127.0.0.1:5000. Permite modificar cualquier parámetro en vivo con las tres opciones de persistencia: solo esta sesión, persistente en config_override.json, o permanente en config.py. Es independiente del menú de terminal — ambas cosas corren al mismo tiempo. También incluye un botón para restaurar todos los valores a los defaults de config.py borrando el archivo de overrides.
+Flask es el cerebro de control y comando (interfaz IA), separado del bucle de ejecución (el motor de trading), se podrá arrancar solo el flask sin arrancar todo lo demás. a partir del flask se podra arrancar todo lo demas o algun archivo unicamente (como backtest por ejemplo). será el punto central de comando.
+   * El sistema de seguridad (keys.enc + módulo de cifrado) usa AES para guardar las claves API de Binance cifradas. El bot pide contraseña al arrancar para descifrar en memoria. Flask requiere esa contraseña más un segundo factor enviado por Telegram antes de permitir acceso. Cada acceso genera alerta con la IP. Cualquier cambio hecho desde Flask o desde el menú de terminal puede guardarse con las tres opciones de persistencia: aplica a parámetros de trading, pero también a cualquier otro cambio de comportamiento del bot como priorizar longs, cambiar el par, activar o desactivar modos, etc.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+DOCUMENTO DE ESPECIFICACIONES Y ESTADO DEL PROYECTO BOT DE TRADING ALGORÍTMICO — BTC/USDC PERPETUO
+________________
+
+
+MÓDULOS COMPLETADOS
+market_feed.py provee la capa de datos unificada. LiveFeed se conecta a Binance Futuros (testnet o producción) via REST con polling y mantiene un snapshot en memoria actualizado en background. BacktestFeed carga un CSV de velas de 1 minuto y las sirve vela a vela con la misma interfaz que el live. Ambos devuelven un MarketSnapshot con OHLCV para los timeframes 1m, 5m, 15m, 1h, 4h, 1d y 1w, más precio actual, funding rate, orderbook imbalance, bid y ask. La función create_feed() es el punto de entrada único. Pendiente de integración: reemplazar URLs, símbolo e intervalos hardcodeados por referencias a cfg de config.py. Pendiente de mejora: lógica de actualización incremental del CSV — al arrancar detectar la última fecha guardada, descargar solo las velas nuevas desde esa fecha hasta hoy, y appendear al archivo existente. Así la descarga completa ocurre solo la primera vez y las siguientes son rápidas.
+indicators.py calcula todos los indicadores técnicos a partir de un MarketSnapshot y devuelve un dict de IndicatorValues por timeframe. Los indicadores implementados son RSI con momentum direccional, EMAs de 7/25/50/99/200 con detección de alineación y compresión, MACD con divergencia alcista y bajista mirando 10 velas atrás, UT Bot basado en ATR con señal de cruce y proximidad al trailing stop, Squeeze Momentum de LazyBear con parámetros key value 1 y ATR period 10 con detección de color de histograma, Ichimoku con nube y cruce TK, VWAP con detección de cruce en la vela actual, Bollinger Bands con detección de banda tocada y zona, ATR como porcentaje del precio, CCI con cruces de zonas extremas, Estocástico con cruces en zonas de sobrecompra y sobreventa, Pivotes estándar con S1/S2/S3 y R1/R2/R3, patrones de velas (envolvente alcista/bajista, martillo, estrella fugaz, doji) con detección de coincidencia con soporte o resistencia, y score de lateralización combinando tipo de velas, RSI neutro y convergencia de máximos y mínimos. También calcula analyze_macro_trend() que evalúa la alineación de 1W, 1D y 4H y detecta divergencia entre diario y semanal. Pendiente de integración: reemplazar constantes hardcodeadas por referencias a cfg.
+scoring.py implementa el sistema de puntaje ponderado continuo con puntaje máximo teórico de aproximadamente 143 puntos. Cada indicador suma puntos de forma gradual según su intensidad, no de forma binaria. Los componentes y sus pesos máximos son: RSI 12pts, EMAs 13pts, MACD 14pts, UT Bot 8pts, Squeeze Momentum 10pts, Ichimoku 9pts, VWAP 5pts, Volumen 8pts, Bollinger Bands 6pts, Tendencia Macro 15pts (el más pesado), Pivotes 5pts, Funding Rate 4pts, Order Book Imbalance 4pts, Patrones de Velas 8pts en scalp y 12pts en swing, Volatilidad tick a tick 6pts, CCI 4pts, Estocástico 4pts, Divergencia MACD separada 6pts, y confirmación del timeframe secundario 8pts bonus. Las condiciones de bloqueo son RSI saturado con EMAs completamente alineadas (probable lateralización) y score de lateralización mayor a 0.65. Los umbrales de entrada son N1 en 57% del máximo para señal fuerte con apalancamiento x5, N2 en 45% más confirmación macro para señal moderada con x3, y N3 en 35% más macro muy alineada para señal débil con x2. Con divergencia entre 1D y 1W el apalancamiento se reduce al 60%, se requiere 15% más de puntaje, y solo se permiten scalps. Los umbrales se incrementan automáticamente según el horario: apertura Wall Street +10%, cierre de semana +10%, cierre de día +5%, horario sin volumen +5%, noticias moderadas +15%. Pendiente de integración: reemplazar THRESHOLDS y constantes de apalancamiento hardcodeadas por referencias a cfg.
+strategy.py es la capa de decisión. Recibe un ScoreResult y devuelve un objeto Decision con todos los parámetros de la operación. El tamaño de posición usa el 100% del capital disponible (una posición a la vez). El SL se ajusta por ATR con un factor máximo de 1.5x y se ancla a la EMA200 si está cerca. Los tres TPs se escalonan al 40%, 70% y 100% del TP base, distribuyendo el cierre en 40%, 35% y 25% de la posición respectivamente, y se ajustan a EMAs intermedias en el camino con margen del 0.1%. El trailing stop se activa cuando el precio avanzó el porcentaje de trigger del modo correspondiente y sube/baja conforme el precio avanza, actualizando también el SL si lo supera. El cierre parcial en EMAs intermedias combina fuerza de ruptura (medida en múltiplos de ATR) con peso del soporte (EMA200 peso 4, EMA99 y EMA50 peso 3, EMA25 peso 2, EMA7 peso 1) para determinar el porcentaje a cerrar, desde 15% en ruptura fuerte con soporte débil hasta 60% en ruptura débil con soporte fuerte. Al hacer cualquier cierre parcial el SL se mueve inmediatamente a breakeven incluyendo comisiones. La gestión de riesgo incluye pausas de 20 velas por modo tras 3 pérdidas consecutivas, pausa global hasta medianoche UTC tras 5 pérdidas en el día, y modo revisión de 30 días (paper trading sin ejecución) si el winrate de las últimas 20 operaciones cae por debajo del 38%. El estado de riesgo persiste en risk_state.json entre reinicios. Pendiente de integración: reemplazar SL_BASE_PCT, TP_BASE_PCT, TRAILING_DISTANCE y TRAILING_TRIGGER hardcodeados por referencias a cfg. Pendiente de funcionalidad: parámetro configurable para priorizar longs o shorts, con soporte para los tres modos de persistencia.
+live_monitor.py es el monitor visual en terminal. Corre un loop cada 60 segundos mostrando precio actual, puntaje de todos los modos y direcciones con colores (verde si supera umbral, amarillo si está cerca, rojo si está lejos), historial de las últimas señales, y countdown hasta el próximo ciclo en la misma línea. Guarda log a monitor_log.txt.
+config.py es la fuente única de verdad para todos los parámetros del sistema. Centraliza configuración de red (URLs, símbolo, tipo de margen), capital y comisiones, apalancamiento por nivel, umbrales de entrada con sus incrementos por horario/condición, parámetros operativos de cada modo (TP, SL, trailing, timeframes, intervalos de evaluación), gestión de riesgo, comportamiento de órdenes, datos históricos, noticias, Telegram, seguridad, logs y optimizador. El método apply_change(param, value, mode) permite modificar cualquier parámetro con tres modos de persistencia: "session" aplica el cambio solo en memoria y se pierde al reiniciar, "persistent" lo guarda en config_override.json y sobrevive reinicios sin tocar el código, "permanent" modifica config.py directamente usando regex para encontrar y reemplazar la línea correspondiente. Al arrancar, load_overrides() recupera automáticamente los cambios persistentes. El método clear_overrides() borra el archivo de overrides y restaura los defaults. El método params_list() devuelve todos los parámetros modificables con su valor actual, tipo y nombre, para que Flask pueda generar los controles de la UI dinámicamente. Los 34 parámetros actualmente mapeados cubren capital, red, apalancamiento, umbrales, TP/SL/trailing de cada modo, riesgo y comportamiento de órdenes. Pendiente: agregar al mapa los parámetros de comportamiento de strategy.py como priorización de dirección, activación de modos, y cualquier otro parámetro de conducta que se quiera controlar desde Flask o terminal.
+________________
+
+
+MÓDULOS PENDIENTES DE CONSTRUIR
+backtest_v3.py es la simulación completa de la estrategia sobre datos históricos de velas de 1 minuto. Usa BacktestFeed de market_feed.py para servir los datos vela a vela. Implementa el split train 70% / validación 15% / test 15% para evitar overfitting. El set de test no se usa hasta el final, cuando los parámetros ya están optimizados, para tener una medición limpia sobre datos que el sistema nunca vio. Registra cada operación simulada con todos sus detalles. Calcula métricas de performance: retorno total, winrate, profit factor, Sharpe ratio, máximo drawdown, promedio de operaciones por día, y desglose por modo y nivel de señal. Es el siguiente módulo a construir. Requiere tener el CSV de datos históricos descargado — se puede hacer una prueba rápida con 90 días antes del definitivo con 1000.
+optimizer_v2.py prueba combinaciones de parámetros sobre backtest_v3.py para encontrar la configuración óptima. Los parámetros a optimizar y sus rangos están definidos en OptimizerConfig dentro de config.py. La métrica de optimización es configurable entre Sharpe ratio, profit factor y retorno total. Requiere un mínimo de 30 operaciones para considerar válido un resultado. Puede correr en paralelo con múltiples workers. Los parámetros óptimos encontrados se aplican en config.py con el modo permanent para que queden como nueva configuración base.
+orders.py gestiona todas las órdenes contra Binance Futuros. Implementa entradas con GTX post-only (si no puede ser maker es rechazada, nunca ejecutada como taker), tres TPs limit maker simultáneos, SL con STOP_MARKET para garantizar ejecución antes de la liquidación, repricing de entrada si el precio subió más del 0.5% con indicadores todavía fuertes, cancelación si los indicadores se debilitaron o si lateralizó más de 2 velas sin ejecutar, cierre a market como fallback si la orden limit desapareció o los indicadores muestran cambio de tendencia definitivo, y configuración de margen aislado o cruzado. Lee todos sus parámetros desde cfg de config.py.
+bot.py es el loop principal del bot en vivo. Corre simultáneamente el loop de trading y el listener de comandos de terminal. Los comandos disponibles son h (lista de comandos), i (informe interactivo de N operaciones), m (último ciclo completo), p (pausar/reanudar bot completo), p1/p2/p3 (pausar/reanudar cada modo individualmente), e (entrada manual verificada), s (salida manual segura sin afectar el bot), 1/2/3 (activar/desactivar modos), on/off (encender/apagar sin cerrar posiciones), kill (apagar cerrando posiciones), q (salir del programa). Cuando un comando modifica un parámetro o comportamiento del bot, pregunta al usuario el modo de persistencia deseado (session, persistent o permanent) antes de aplicar el cambio. Lee su configuración desde cfg.
+telegram_bot.py gestiona todas las notificaciones por Telegram. El bot se crea en @BotFather y genera un token que se guarda en keys.enc. Notifica apertura de operaciones con todos los detalles, cierre con resultado y PNL, activación de pausas por modo o global, señales fuertes detectadas aunque no se operen, entrada en modo revisión por falla sistémica, y alertas de seguridad con la IP de cada acceso a la interfaz Flask. El token y chat_id se cargan desde keys.enc al arrancar, nunca desde config.py.
+news_monitor.py se conecta a CryptoPanic (con token gratuito) para noticias cripto con votos de impacto, Alternative.me para el Fear & Greed Index (sin clave), y RSS de CoinTelegraph y CoinDesk. Revisa cada 5 minutos. La lógica de pausa combina el valor del Fear & Greed con el impacto de las noticias: Fear & Greed entre 15-85 o noticias moderadas genera pausa de 15 minutos y requiere 15% más de puntaje, menor a 20 o mayor a 80 o noticias de alto impacto genera pausa de 60 minutos, menor a 10 o mayor a 90 o noticias extremas genera pausa de 4 horas. Para noticias geopolíticas evalúa si BTC reacciona más del 2% (pausa 4 horas) o menos del 0.5% (solo 10% más de puntaje). En backtest está desactivado porque no hay datos históricos de noticias disponibles para simular.
+Sistema de seguridad (keys.enc más módulo de cifrado): las claves API de Binance se guardan cifradas con AES en keys.enc. El bot pide contraseña al arrancar para descifrarlas en memoria — nunca quedan en disco en texto legible. Los permisos de la API de Binance se configuran restringidos a la IP específica del servidor. Los logs y el historial se guardan cifrados. El token de Telegram y el chat_id también van en keys.enc.
+Interfaz Flask (web_interface/): se abre en el browser en http://127.0.0.1:5000. Requiere contraseña más código 2FA enviado por Telegram antes de permitir acceso. Muestra el estado actual del bot, posición abierta si hay una, puntajes en tiempo real, y el historial de operaciones. Permite modificar cualquier parámetro disponible en config.py con las tres opciones de persistencia (session, persistent, permanent), incluyendo parámetros de comportamiento como priorización de dirección o activación de modos. La interfaz pregunta qué sección, qué parámetro, el nuevo valor, y el modo de persistencia — no requiere que el usuario escriba código. Incluye un botón para restaurar todos los valores a los defaults borrando config_override.json. Incluye una opción avanzada separada para usuarios que quieran insertar, modificar o eliminar líneas de código directamente en cualquier archivo del proyecto — esa opción sí muestra el código y permite editarlo. El diseño y layout de la interfaz es configurable: colores, orden de los paneles, qué información mostrar en primer plano, y densidad de información. Acceso restringido a IP local solamente. Cada acceso genera alerta por Telegram con la IP del que ingresó.
+________________
+
+
+INTEGRACIÓN PENDIENTE EN MÓDULOS YA CONSTRUIDOS
+scoring.py tiene hardcodeados THRESHOLDS, LEVERAGE_BY_LEVEL, TP_SL_BY_MODE, THRESHOLD_INCREMENTS y MODE_TIMEFRAMES. Todos deben reemplazarse por referencias a cfg cuando el sistema esté completo y antes de ir a testnet.
+strategy.py tiene hardcodeados SL_BASE_PCT, TP_BASE_PCT, TRAILING_DISTANCE, TRAILING_TRIGGER en OperationBuilder, y los triggers de trailing en PositionManager. Todos deben migrarse a cfg. Además falta agregar el parámetro de priorización de dirección (long/short) con soporte para los tres modos de persistencia.
+market_feed.py tiene hardcodeadas las URLs de testnet y producción, el símbolo por default, CANDLES_TO_LOAD y los refresh_every del background loop. Todos deben leerse desde cfg.
+________________
+
+
+MEJORAS FUTURAS IDENTIFICADAS (no urgentes)
+Open interest de Binance como indicador adicional: cuando sube mucho junto con el precio puede indicar sobreextensión y es una señal que los indicadores de precio solo no capturan.
+Liquidation heatmap: niveles donde hay grandes acumulaciones de stops. El precio frecuentemente va a buscarlos antes de continuar en la dirección principal.
+Delta de volumen vela a vela: diferencia entre volumen comprador y vendedor, que captura desequilibrios de presión que el volumen total no muestra.
+Conexión con TradingView via webhooks para recibir señales de Squeeze Momentum, UT Bot y Pivotes Estándar directamente desde los indicadores de TradingView, volver a hacer backtest con esa lógica y luego testnet antes de producción.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# PROYECTO BOT DE TRADING ALGORÍTMICO — BTC/USDC PERPETUO
+## Documento de estado, especificaciones y decisiones de diseño
+
+
+---
+
+
+## MÓDULOS COMPLETADOS
+
+
+### market_feed.py
+Capa de datos unificada. LiveFeed se conecta a Binance Futuros (testnet o producción) via REST con polling y mantiene un snapshot en memoria actualizado en background. BacktestFeed carga un CSV de velas de 1 minuto y las sirve vela a vela con la misma interfaz que el live. Ambos devuelven un MarketSnapshot con OHLCV para los timeframes 1m, 5m, 15m, 1h, 4h, 1d y 1w, más precio actual, funding rate, orderbook imbalance, bid y ask. La función create_feed() es el punto de entrada único.
+
+
+**Pendiente de integración:** reemplazar URLs, símbolo e intervalos hardcodeados por referencias a cfg de config.py.
+
+
+**Pendiente de mejora:** lógica de actualización incremental del CSV. Al arrancar, detectar la última fecha guardada en el archivo, descargar solo las velas nuevas desde esa fecha hasta hoy, y appendear al archivo existente. Así la descarga completa ocurre solo la primera vez y las siguientes son rápidas.
+
+
+---
+
+
+### indicators.py
+Calcula todos los indicadores técnicos a partir de un MarketSnapshot y devuelve un dict de IndicatorValues por timeframe. Los indicadores implementados son RSI con momentum direccional, EMAs de 7/25/50/99/200 con detección de alineación y compresión, MACD con divergencia alcista y bajista mirando 10 velas atrás, UT Bot basado en ATR con señal de cruce y proximidad al trailing stop, Squeeze Momentum de LazyBear (key value 1, ATR period 10) con detección de color de histograma, Ichimoku con nube y cruce TK, VWAP con detección de cruce en la vela actual, Bollinger Bands con detección de banda tocada y zona, ATR como porcentaje del precio, CCI con cruces de zonas extremas, Estocástico con cruces en sobrecompra y sobreventa, Pivotes estándar con S1/S2/S3 y R1/R2/R3, patrones de velas (envolvente alcista/bajista, martillo, estrella fugaz, doji) con detección de coincidencia con soporte o resistencia, y score de lateralización combinando tipo de velas, RSI neutro y convergencia de máximos y mínimos. También incluye analyze_macro_trend() que evalúa la alineación de 1W, 1D y 4H y detecta divergencia entre diario y semanal.
+
+
+**Pendiente de integración:** reemplazar constantes hardcodeadas por referencias a cfg.
+
+
+**Mejoras futuras identificadas:** agregar open interest de Binance (cuando sube mucho junto con el precio puede indicar sobreextensión — señal que los indicadores de precio solos no capturan), liquidation heatmap (niveles con grandes acumulaciones de stops que el precio frecuentemente va a buscar antes de continuar), delta de volumen vela a vela (diferencia entre volumen comprador y vendedor, captura desequilibrios de presión que el volumen total no muestra), y ADX (Average Directional Index, mide fuerza de tendencia sin importar dirección — necesario para el detector de régimen de mercado).
+
+
+---
+
+
+### scoring.py
+Sistema de puntaje ponderado continuo con puntaje máximo teórico de aproximadamente 143 puntos. Cada indicador suma puntos de forma gradual según su intensidad, no binariamente. Los componentes y sus pesos máximos son: RSI 12pts, EMAs 13pts, MACD 14pts, UT Bot 8pts, Squeeze Momentum 10pts, Ichimoku 9pts, VWAP 5pts, Volumen 8pts, Bollinger Bands 6pts, Tendencia Macro 15pts (el más pesado), Pivotes 5pts, Funding Rate 4pts, Order Book Imbalance 4pts, Patrones de Velas 8pts en scalp y 12pts en swing, Volatilidad tick a tick 6pts, CCI 4pts, Estocástico 4pts, Divergencia MACD separada 6pts, y confirmación del timeframe secundario 8pts bonus.
+
+
+Las condiciones de bloqueo son RSI saturado con EMAs completamente alineadas (probable lateralización) y score de lateralización mayor a 0.65. Los umbrales de entrada son N1 en 57% del máximo para señal fuerte con apalancamiento x5, N2 en 45% más confirmación macro para señal moderada con x3, y N3 en 35% más macro muy fuerte para señal débil con x2. Con divergencia entre 1D y 1W el apalancamiento se reduce al 60%, se requiere 15% más de puntaje, y solo se permiten scalps. Los umbrales se incrementan automáticamente según el horario: apertura Wall Street +10%, cierre de semana +10%, cierre de día +5%, horario sin volumen +5%, noticias moderadas +15%.
+
+
+**Pendiente de integración:** reemplazar THRESHOLDS, LEVERAGE_BY_LEVEL, TP_SL_BY_MODE, THRESHOLD_INCREMENTS y MODE_TIMEFRAMES hardcodeados por referencias a cfg.
+
+
+**Pendiente de mejora:** sistema de pesos dinámicos según régimen de mercado. En mercado lateral los pesos del scoring deben cambiar: RSI extremo y Bollinger Bands tocadas valen más, EMAs alineadas valen menos, porque en lateral el precio rebota en extremos en vez de seguir tendencia. Implementar junto con el detector de régimen de market_feed/indicators.
+
+
+---
+
+
+### strategy.py
+Capa de decisión. Recibe un ScoreResult y devuelve un objeto Decision con todos los parámetros de la operación. El tamaño de posición usa el 100% del capital disponible (una posición a la vez). El SL se ajusta por ATR con factor máximo de 1.5x y se ancla a la EMA200 si está cerca. Los tres TPs se escalonan al 40%, 70% y 100% del TP base distribuyendo el cierre en 40%, 35% y 25% de la posición, y se ajustan a EMAs intermedias en el camino con margen del 0.1%. El trailing stop se activa cuando el precio avanzó el porcentaje de trigger del modo y sube conforme el precio avanza. El cierre parcial en EMAs intermedias combina fuerza de ruptura (en múltiplos de ATR) con peso del soporte (EMA200=4, EMA99/50=3, EMA25=2, EMA7=1). Al hacer cualquier cierre parcial el SL se mueve a breakeven incluyendo comisiones. La gestión de riesgo incluye pausas de 20 velas por modo tras 3 pérdidas consecutivas, pausa global hasta medianoche UTC tras 5 pérdidas en el día, y modo revisión de 30 días (paper trading) si el winrate de las últimas 20 operaciones cae por debajo del 38%. El estado persiste en risk_state.json.
+
+
+**Pendiente de integración:** reemplazar SL_BASE_PCT, TP_BASE_PCT, TRAILING_DISTANCE, TRAILING_TRIGGER y triggers de trailing hardcodeados por referencias a cfg.
+
+
+**Pendiente de funcionalidad:** sistema de prioridad de modos configurable. Por default el bot prioriza swing sobre mediano sobre scalp porque el ratio riesgo/beneficio es mejor (swing TP 2.5% vs scalp TP 0.6%). Cuando no hay condiciones para swing el sistema evalúa si vale la pena un mediano o scalp. Si el mercado está lateral o incierto y no hay señal clara en ningún modo, no opera. El detector de régimen de mercado determina si el contexto es favorable para cada tipo de operación. El capital puede dividirse opcionalmente: por ejemplo 70% reservado para swings y 30% disponible para scalps en días laterales.
+
+
+---
+
+
+### live_monitor.py
+Monitor visual en terminal. Corre un loop cada 60 segundos mostrando precio actual, puntaje de todos los modos y direcciones con colores (verde si supera umbral, amarillo si está cerca, rojo si está lejos), historial de las últimas señales, y countdown hasta el próximo ciclo en la misma línea. Guarda log a monitor_log.txt.
+
+
+---
+
+
+### config.py
+Fuente única de verdad para todos los parámetros del sistema. Centraliza configuración de red (URLs, símbolo, tipo de margen), capital y comisiones, apalancamiento por nivel, umbrales de entrada con sus incrementos por horario/condición, parámetros operativos de cada modo (TP, SL, trailing, timeframes, intervalos de evaluación), gestión de riesgo, comportamiento de órdenes, datos históricos, noticias, Telegram, seguridad, logs y optimizador.
+
+
+El método apply_change(param, value, mode) permite modificar cualquier parámetro con tres modos de persistencia. "session" aplica el cambio solo en memoria y se pierde al reiniciar — útil para probar algo en vivo sin comprometerse. "persistent" guarda el cambio en config_override.json que sobrevive reinicios sin tocar el código — para deshacerlo se usa clear_overrides() o el botón de Flask. "permanent" modifica config.py directamente usando regex para encontrar y reemplazar la línea correspondiente — el valor queda en el código base. Estos tres modos de persistencia aplican a cualquier cambio hecho desde Flask, desde el menú de terminal, o desde comandos del bot — no solo a parámetros numéricos sino también a comportamientos como priorización de dirección, activación de modos, o cualquier otra configuración de conducta.
+
+
+Al arrancar, load_overrides() recupera automáticamente los cambios persistentes. clear_overrides() borra el archivo y restaura defaults. params_list() devuelve los 34 parámetros actualmente mapeados para que Flask genere los controles dinámicamente.
+
+
+**Pendiente:** agregar al _PARAM_MAP los parámetros de comportamiento de strategy.py — priorización de dirección (long/short), jerarquía de modos, fracción de capital por tipo de operación, y cualquier otro parámetro de conducta que se quiera controlar desde Flask o terminal.
+
+
+---
+
+
+## MÓDULOS PENDIENTES DE CONSTRUIR
+
+
+### backtest_v3.py
+Simulación completa sobre datos históricos de velas de 1 minuto usando BacktestFeed de market_feed.py. Implementa split train 70% / validación 15% / test 15% para evitar overfitting. El concepto del split es el siguiente: el 70% de los datos se usa para correr el backtest y entender el comportamiento de la estrategia. El 15% de validación se usa para probar los parámetros encontrados por el optimizer y verificar que funcionan en un período que el optimizer no vio. El 15% de test se guarda intocable hasta el final absoluto — se usa una sola vez cuando ya se está satisfecho con todo, para tener una medición limpia sobre datos que ni el entrenamiento ni la optimización tocaron jamás. Si el resultado del test es parecido al de validación el sistema generaliza bien; si es muy distinto hay overfitting.
+
+
+Registra cada operación simulada con todos sus detalles. Calcula métricas de performance: retorno total, winrate, profit factor, Sharpe ratio, máximo drawdown, promedio de operaciones por día, y desglose por modo y nivel de señal. Es el siguiente módulo a construir. Para una primera prueba se puede usar 90 días; el backtest definitivo usa 1000 días.
+
+
+### optimizer_v2.py
+Prueba combinaciones de parámetros sobre backtest_v3.py para encontrar la configuración óptima. Los rangos a probar están definidos en OptimizerConfig dentro de config.py. La métrica es configurable entre Sharpe ratio, profit factor y retorno total. Requiere mínimo 30 operaciones para considerar válido un resultado. Puede correr en paralelo con múltiples workers. Los parámetros óptimos encontrados se aplican con modo "permanent" en config.py.
+
+
+### orders.py
+Gestiona todas las órdenes contra Binance Futuros. GTX post-only para entradas (si no puede ser maker es rechazada, nunca taker), tres TPs limit maker simultáneos, SL con STOP_MARKET para garantizar ejecución antes de la liquidación, repricing de entrada si el precio subió más del 0.5% con indicadores todavía fuertes, cancelación si los indicadores se debilitaron o lateralizó más de 2 velas sin ejecutar, cierre a market como fallback si la orden limit desapareció o hay cambio de tendencia definitivo, y configuración de margen aislado o cruzado. Lee todos sus parámetros desde cfg.
+
+
+### bot.py
+Loop principal del bot en vivo. Corre simultáneamente el loop de trading y el listener de comandos de terminal. Los comandos disponibles son h (lista), i (informe interactivo), m (último ciclo completo), p (pausar/reanudar completo), p1/p2/p3 (pausar/reanudar cada modo), e (entrada manual verificada), s (salida manual segura), 1/2/3 (activar/desactivar modos), on/off (encender/apagar sin cerrar posiciones), kill (apagar cerrando posiciones), q (salir). Cuando un comando modifica un parámetro o comportamiento, pregunta el modo de persistencia (session, persistent o permanent) antes de aplicar.
+
+
+### telegram_bot.py
+Notificaciones por Telegram. Notifica apertura y cierre de operaciones con todos los detalles, pausas por modo o global, señales fuertes detectadas aunque no se operen, entrada en modo revisión, y alertas de seguridad con IP de cada acceso a Flask. Token y chat_id se cargan desde keys.enc al arrancar, nunca desde config.py.
+
+
+### news_monitor.py
+CryptoPanic (token gratuito), Alternative.me Fear & Greed Index (sin clave), y RSS de CoinTelegraph y CoinDesk. Revisión cada 5 minutos. Fear & Greed 15-85 o noticias moderadas: pausa 15 minutos y +15% de umbral. Menor a 20 o mayor a 80 o alto impacto: pausa 60 minutos. Menor a 10 o mayor a 90 o extremo: pausa 4 horas. Para noticias geopolíticas: si BTC mueve más del 2% pausa 4 horas, si mueve menos del 0.5% solo +10% de umbral. Desactivado en backtest.
+
+
+### Sistema de seguridad (keys.enc + módulo de cifrado)
+Claves API de Binance cifradas con AES en keys.enc. El bot pide contraseña al arrancar para descifrarlas en memoria — nunca en disco legible. Permisos de API restringidos a la IP específica del servidor. Logs e historial cifrados. Token de Telegram y chat_id también en keys.enc.
+
+
+### Detector de régimen de mercado
+Componente que evalúa si el mercado está en tendencia, lateral, o volátil-sin-dirección. Usa separación de EMAs, ADX y ancho de Bandas de Bollinger. El resultado alimenta la jerarquía de prioridad de modos (swing en tendencia, scalp en lateral, no operar en incierto) y los pesos dinámicos del scoring (en lateral RSI extremo y Bollinger valen más, EMAs alineadas valen menos).
+
+
+### Interfaz Flask (web_interface/)
+Se abre en el browser en http://127.0.0.1:5000. Requiere contraseña más código 2FA enviado por Telegram. Muestra estado del bot, posición abierta, puntajes en tiempo real e historial de operaciones. Permite modificar cualquier parámetro con las tres opciones de persistencia (session, persistent, permanent) — la interfaz pregunta sección, parámetro, nuevo valor y modo de persistencia sin que el usuario escriba código. Incluye botón para restaurar defaults. Incluye opción avanzada separada para insertar, modificar o eliminar líneas de código directamente en cualquier archivo del proyecto. El diseño es configurable: colores, orden de paneles, densidad de información. Acceso solo desde IP local. Cada acceso genera alerta por Telegram con la IP.
+
+
+Integración de IA generativa en Flask: el usuario puede escribir en lenguaje natural dentro de la interfaz — "subí el umbral del scalp un poco", "¿cómo estuvo el rendimiento esta semana?", "pausá los swings hasta mañana" — y el modelo interpreta la intención, identifica el parámetro correspondiente, sugiere el valor, y ejecuta el cambio con confirmación del usuario antes de aplicarlo.
+
+
+---
+
+
+## INTEGRACIÓN PENDIENTE EN MÓDULOS YA CONSTRUIDOS
+
+
+**scoring.py:** THRESHOLDS, LEVERAGE_BY_LEVEL, TP_SL_BY_MODE, THRESHOLD_INCREMENTS y MODE_TIMEFRAMES deben reemplazarse por referencias a cfg.
+
+
+**strategy.py:** SL_BASE_PCT, TP_BASE_PCT, TRAILING_DISTANCE, TRAILING_TRIGGER y los triggers de trailing en PositionManager deben migrarse a cfg. Agregar parámetro de priorización de dirección y jerarquía de modos.
+
+
+**market_feed.py:** URLs, símbolo por default, CANDLES_TO_LOAD y refresh_every del background loop deben leerse desde cfg. Agregar lógica de actualización incremental del CSV.
+
+
+---
+
+
+## MEJORAS FUTURAS IDENTIFICADAS
+
+
+**Open interest de Binance:** cuando el open interest sube mucho junto con el precio puede indicar sobreextensión y posible reversión — señal que los indicadores de precio solos no capturan. Agregar como componente del scoring con peso moderado.
+
+
+**Liquidation heatmap:** niveles donde hay grandes acumulaciones de stops. El precio frecuentemente va a buscarlos antes de continuar en la dirección principal. Útil para ajustar el target del TP o anticipar movimientos bruscos.
+
+
+**Delta de volumen vela a vela:** diferencia entre volumen comprador y vendedor. Captura desequilibrios de presión que el volumen total no muestra — una vela alcista con delta negativo (más vendedores que compradores) es una señal de advertencia.
+
+
+**Conexión con TradingView via webhooks:** recibir señales de Squeeze Momentum, UT Bot y Pivotes Estándar directamente desde TradingView. Requiere volver a hacer backtest con esa lógica y luego testnet antes de producción.
+
+
+**Machine learning acotado:** no usar ML para reemplazar el sistema de reglas sino para tareas específicas dentro de él. El caso más útil es un clasificador de régimen de mercado entrenado para detectar tendencia / lateral / volátil-sin-dirección, que alimente los pesos dinámicos del scoring. Otro caso es calibrar automáticamente los pesos de los indicadores según el régimen histórico en vez de tenerlos fijos. Esto combina la transparencia y controlabilidad del sistema de reglas actual con la capacidad adaptativa del ML. No usar ML end-to-end (que tome la decisión completa) porque los regímenes de cripto cambian rápido y el modelo se degrada sin aviso.
+
+
+**Auto-optimización estadística:** el bot monitorea su propio rendimiento en producción, detecta cuando una clase de operaciones tiene winrate sistemáticamente bajo (por ejemplo todos los scalps en determinado horario o con determinada configuración macro), y ajusta automáticamente los pesos o umbrales de esa clase. Alcanzable sin ML puro — es análisis estadístico del historial propio con reglas de ajuste definidas.
+
+
+**Tipos de IA adicionales para considerar a futuro:** reinforcement learning donde el bot aprende por ensayo y error recibiendo recompensa cuando gana (requiere simulación de mercado muy precisa), clasificación supervisada entrenada con ejemplos históricos etiquetados de entradas buenas y malas, detección de anomalías para activar modo cautela cuando el mercado se comporta de forma inusual respecto al histórico, y modelos de series temporales tipo LSTM o Transformer para predicción de precio (usados en investigación académica con resultados mixtos en producción real).
+
+
+**Interacción con el bot vía IA en Flask:** más allá de modificar parámetros, el usuario podría preguntarle al bot en lenguaje natural cosas como "¿por qué no operaste en la última hora?" o "¿qué señales están cerca de dispararse?" y recibir una respuesta generada con el contexto real del mercado actual. Requiere integrar una API de modelo de lenguaje con acceso al estado interno del bot.
+
+
+---
+
+
+## NOTAS DE DISEÑO Y DECISIONES TOMADAS
+
+
+El sistema de puntaje ponderado continuo es superior a las condiciones binarias porque captura gradaciones: un RSI en 15 es mucho más significativo que uno en 29 y el sistema lo refleja. La tendencia macro (1W/1D/4H) y el funding rate son los componentes que más valor añaden porque capturan información que los indicadores de precio solos no ven.
+
+
+El riesgo principal del sistema no es la estructura sino el overfitting: con tantos parámetros el optimizer puede encontrar una combinación que funciona perfectamente en datos históricos pero falla en producción porque aprendió el pasado específico. El split train/val/test es la defensa principal contra esto.
+
+
+No usar ML end-to-end para las decisiones de trading porque los regímenes de mercado en cripto cambian rápido, el modelo se degrada sin aviso visible, y cuando falla es difícil diagnosticar por qué. El sistema de reglas actual tiene la ventaja de ser completamente transparente y debuggeable.
+
+
+El flujo de producción es: backtest con 1000 días → optimizer → actualizar config.py con parámetros óptimos → segundo backtest para confirmar → construir módulos pendientes → testnet varios días → si el desempeño es consistente migrar a producción con capital pequeño → escalar gradualmente.
+
+
+
+
+
+
+
+
+
+
+
+
+mensaje para mi chat con claude:”
+(me aparece que generaste el archivo del proyecto y su estado pero me parece que no me aparece el archivo (es proyecto bot estado?))
+hagamos lo del detector de régimen de mercado
+apliquemos eso del scoring
+por que el diagnóstico sería más difícil? y por que sí sabría que es lo que falla con mi bot actual? si no tengo idea
+en lo que convenga aplicar ml apliquemoslo, como funciona ml? tenemos que armarlo?
+por que no es algo para hacer ahora? porque tomaria mucho tiempo o que? si es algo bueno para implementar pero no tdv agregalo al parrafo
+agrega para hacer lo de la ia, y en esas cosas que convendria agregarla (por ej lo de reinforcement learning, de clasificación supervisada, de detección de anomalías, de series temporales, y la api de gpt, claude, gemini o así) 
+lo de auto-optimización o meta-learning o ml hagamoslo tambien
+
+ias a implementar
+IA para investigación de señales: le das datos históricos y le pedís que encuentre patrones estadísticamente significativos. Claude, GPT-4, o modelos especializados pueden hacer esto. No será tan bueno como un PhD en matemáticas con 10 años de experiencia, pero es infinitamente mejor que nada.
+IA para monitoreo y alertas: un agente que mire logs del bot, detecte comportamientos anómalos y te avise. Esto es muy factible hoy.
+IA para análisis de sentimiento: modelos de NLP que procesen noticias y tweets en tiempo real. Hay APIs baratas para esto.
+IA para optimización de parámetros: Optuna, Ray Tune, o un agente que corra backtests sistemáticamente y ajuste parámetros.
+Lo que la IA no puede reemplazar todavía: juicio humano en situaciones sin precedente (un cisne negro como COVID en marzo 2020), infraestructura física (co-location, latencia), y compliance legal.
+tenemos Fear & Greed Index? deteccion de regimen de mercado ? habria que utilizarlo para operar en momentos irregulares de mercado donde ciertas tendencias toman el control del mercado a pesar de todos los indicadores
+En tendencia alcista fuerte:
+      * Inverso: favorecer longs, reducir shorts, dejar correr más las ganancias
+En mercado lateral (rango):
+      * Estrategia mean-reversion en lugar de trend-following
+      * Targets más conservadores, TP más cercanos
+“Cómo detectar el régimen automáticamente:
+      * EMA 50/200 en timeframe diario o semanal: si el precio está debajo de ambas, régimen bajista
+      * ADX > 25 = tendencia, ADX < 20 = rango
+      * Variación porcentual de los últimos 7-14 días vs volatilidad histórica
+Esto específicamente — agregar detección de régimen al bot — es probablemente el cambio individual con mayor impacto que podés hacer. Un bot que adapta su estrategia al contexto macro va a superar enormemente a uno que usa los mismos parámetros en todos los mercados.” que opinas de eso?serviria o hay mas cosas que pueda aplicar para el deteccion de regimen?
+
+Datos alternativos gratuitos o baratos a agregar:
+“Sentimiento y noticias:
+      * Fear & Greed Index (alternative.me) — gratuito, API disponible
+      * LunarCrush — datos de redes sociales cripto, tiene tier gratuito
+      * CryptoPanic API — agregador de noticias cripto, gratuito con límites
+      * Reddit API (r/Bitcoin, r/CryptoMarkets) — análisis de sentimiento propio
+On-chain (específico cripto, muy valioso):
+      * Glassnode — tier gratuito con métricas básicas (NUPL, SOPR, exchange flows)
+      * CryptoQuant — similar, métricas on-chain
+      * IntoTheBlock — gratuito con registro
+      * Whale Alert API — movimientos grandes en blockchain, tier gratuito
+Macro y correlaciones:
+      * FRED (Federal Reserve) — tasas, inflación, datos macro de EEUU, completamente gratuito
+      * Yahoo Finance / yfinance en Python — DXY, S&P500, oro, correlaciones con cripto
+Lo importante: estos datos son públicos, los fondos grandes también los miran, pero los usan como una señal entre muchas. Para un bot retail, agregar Fear & Greed + métricas on-chain básicas + sentimiento de noticias puede mejorar la eficacia notablemente, especialmente para filtrar entradas en momentos de pánico extremo o euforia extrema.”
+agrega todas estas cosas y tus recomendaciones o actualizaciones al archivo.
+al final el eventbus no lo utilizamos? por que era eso?
+tenemos logger y risk_manager?
+en alguno de los chats que tuve intentamos algo con pandas y no se podia entonces buscamos una alternativa (o creo que descargamos otra version de python)
+
+
+
+
+el bot que estamos haciendo sigue esta logica? debe o es mejor de otra forma? hay algo que falte agregar? hay algo que seria mejor sacar o modificar?
+┌─────────────────────────────────────────────────────┐
+│                    CAPA DE DATOS                                                                       │
+│  market_feed.py — WebSocket + REST para OHLCV                                           │
+│  Normaliza datos para que el resto no sepa                                                        │
+│  si viene de testnet, producción o backtest                                                   │
+└─────────────────────────┬───────────────────────────┘
+                                                           │
+┌─────────────────────────▼───────────────────────────┐
+│                 CAPA DE INDICADORES                                                                  │
+│  indicators.py — cálculos puros, sin estado                                                              │
+│  Entrada: DataFrame OHLCV                                                                          │
+│  Salida: dict con todos los valores calculados                                                 │
+└─────────────────────────┬───────────────────────────┘
+                                                             │
+┌─────────────────────────▼───────────────────────────┐
+│                  CAPA DE SCORING                                                                    │
+│  scoring.py — lógica pura, sin estado                                                                   │
+│  Entrada: dict de indicadores                                                                         │
+│  Salida: ScoreResult(total, breakdown, level)                                                   │
+└─────────────────────────┬───────────────────────────┘
+                                                             │
+┌─────────────────────────▼───────────────────────────┐
+│                CAPA DE DECISIÓN                                                                      │
+│  strategy.py — evalúa los 3 modos                                                           │
+│  Entrada: ScoreResult + estado actual                                                         │
+│  Salida: Decision(action, size, sl, tp, leverage)                                              │
+└─────────────────────────┬───────────────────────────┘
+                                                             │
+┌─────────────────────────▼───────────────────────────┐
+│               CAPA DE EJECUCIÓN                                                                      │
+│  orders.py — conecta con Binance                                                                    │
+│  Entrada: Decision                                                                                        │
+│  Salida: OrderResult                                                                                     │
+└─────────────────────────┬───────────────────────────┘
+                                                            │
+┌─────────────────────────▼───────────────────────────┐
+│           CAPA DE GESTIÓN DE RIESGO                                                                  │
+│  risk_manager.py — pausa, contadores, drawdown                                           │
+│  Corre en paralelo y puede bloquear ejecución                                                  │
+└─────────────────────────────────────────────────────┘
+hagamos que el bot se ejecute todo con un solo comando o boton, te parece? o activar el flask y que desde el flask pueda seleccionar para activar las distintas partes del bot, por si queremos probar alguna parte en particular sin activar todo el bot (por ejemplo el backtest o el optimizer)
+lo del ml,  automatizar el optimizer para que corra cada 30 días en segundo plano, compare los nuevos parámetros contra el período de test reservado, y solo actualice si la mejora supera un umbral mínimo. Vos recibís una notificación por Telegram con el resumen y aprobás o rechazás el cambio. Automatización con supervisión humana. que opinas? 
+
+
+aplicando la Gestión de Riesgo Dinámica 
+“En lugar de operar siempre con el mismo tamaño de posición (ej: siempre 2% del capital), el bot ajusta ese tamaño según las condiciones del momento:
+      * Volatilidad alta (ATR grande, mercado errático) → posiciones más chicas, stops más amplios
+      * Volatilidad baja (mercado tranquilo, tendencia clara) → posiciones más grandes, stops más ajustados
+      * Después de una racha de pérdidas → reducir tamaño automáticamente hasta recuperar
+Fórmula simple de base: tamaño_posicion = (riesgo_por_trade / distancia_al_stop) * capital
+Donde el riesgo_por_trade varía según el régimen de mercado detectado.”,
+sharp ratio, reduciendo riesgo de perdida y ganancia, podría obtener un ingreso constante sin perdidas por mas que no sea tan alto? cuanto podria obtener como maximo siendo totalmente seguro promediando el retorno?
+cuanto podria promediar en ganancias y perdidas mensuales y anuales?
+“Riesgo por trade: 0.5% a 1%” cuanto tenemos seteado actualmente? 
+recomendación concreta
+Usá 1:2 como base, pero dinámico según el régimen:
+Mercado en tendencia fuerte → podés ampliar a 1:2.5 o 1:3 (el precio tiene momentum)
+Mercado en rango → bajarlo a 1:1.5 (el precio rebota antes de llegar lejos)
+Alta volatilidad → 1:2 estándar pero con stop más amplio
+que opinas?
+
+Scalping puro sin edge claro
+Trend following con filtros
+Mean reversion en rango
+Breakout
+estas son estrategias que pueda tener el bot? cual conviene que aplique?
+para determinar el apalancamiento decis que hagamos “Apalancamiento = Riesgo en USDT / (Precio de entrada × % de distancia al Stop Loss)”?”
+
+
+
+
+
+
+# DOCUMENTO DE ESPECIFICACIONES TÉCNICAS COMPLETO — BOT DE TRADING ALGORÍTMICO (BTC/USDC PERPETUO)
+
+
+## SECCIÓN 1: ARQUITECTURA GENERAL Y FILOSOFÍA DE DISEÑO
+
+
+El bot está estructurado bajo una arquitectura de capas desacopladas donde cada componente asume una responsabilidad única, facilitando el testeo independiente. La Capa de Datos (market_feed.py) normaliza la información de Binance mediante WebSocket y REST, logrando que el sistema sea agnóstico respecto al entorno de Testnet o Producción. La Capa de Indicadores (indicators.py) procesa cálculos técnicos puros sin gestionar estados. La Capa de Scoring (scoring.py) aplica la lógica de puntaje ponderado continuo. La Capa de Decisión (strategy.py) analiza el contexto macro y la jerarquía de modos operativos. La Capa de Ejecución (orders.py) interactúa con Binance usando órdenes inteligentes como GTX y SL STOP_MARKET. Finalmente, la Capa de Gestión de Riesgo (risk_manager.py) funciona como un guardián transversal capaz de pausar la operativa ante rachas negativas o fallas sistémicas. Este diseño de "Caja Blanca" permite que cada movimiento sea auditable y transparente, algo vital para el diagnóstico preciso del sistema.
+
+
+## SECCIÓN 2: CONFIGURACIÓN Y PARÁMETROS OPERATIVOS
+
+
+El par operado es BTC/USDC perpetuo con un capital base inicial de 100 USDC (configurable). El apalancamiento es dinámico y se ajusta según la calidad de la señal: Nivel 1 (fuerte) usa x5, Nivel 2 (moderada) usa x3, y Nivel 3 (débil) usa x2. Ante divergencias entre la tendencia diaria y semanal, la exposición se reduce automáticamente al 60% del nivel asignado. Los modos operativos se dividen en Scalp (15m/5m, TP ~0.6%, SL ~0.4%, ratio 1.5:1), Mediano (1h/15m, TP ~1%, SL ~0.5%, ratio 2:1) y Swing (4h/1h, TP ~2.5%, SL ~0.8%, ratio 3:1). Se priorizan las órdenes limit maker con timeInForce GTX para optimizar comisiones, aunque el sistema contempla rentabilidad incluso en escenarios de ejecución taker (0.10% total). Los cambios en el bot pueden aplicarse con tres grados de persistencia: session (memoria volátil), persistent (JSON de overrides) y permanent (modificación directa en config.py mediante regex).
+
+
+## SECCIÓN 3: SISTEMA DE SCORING PONDERADO
+
+
+El motor de decisiones se basa en un puntaje continuo con un máximo de 143 puntos. El disparo de entrada depende de umbrales porcentuales: Nivel 1 (≥57%), Nivel 2 (≥45% con confirmación macro) y Nivel 3 (≥35% con macro alineada). Los pesos asignados incluyen: Tendencia Macro (15 pts), MACD (14 pts), EMAs (13 pts), RSI (12 pts), Squeeze Momentum (10 pts), Ichimoku (9 pts), Patrones de Velas (8-12 pts según el plazo), Volumen (8 pts), UT Bot (8 pts), Bollinger Bands (6 pts), Divergencia MACD (6 pts), Pivotes (5 pts), VWAP (5 pts), CCI (4 pts), Funding Rate (4 pts), Order Book Imbalance (4 pts), Estocástico (4 pts) y Volatilidad Tick a Tick (6 pts). La operativa se bloquea preventivamente ante lateralizaciones probables detectadas por el score de lateralización (umbral 0.65) o RSI saturado con EMAs alineadas.
+
+
+## SECCIÓN 4: GESTIÓN DE RIESGO Y SEGURIDAD
+
+
+El módulo risk_manager.py supervisa la racha operativa: tres fallos consecutivos en un modo pausan esa estrategia por 20 velas, mientras que cinco pérdidas diarias totales detienen el bot global hasta medianoche UTC. Si el winrate desciende del 38% en 20 operaciones, se activa el Modo Revisión, forzando 30 días de paper trading para auditar la estrategia. En cuanto a seguridad, las credenciales se cifran con AES en keys.enc, el bot requiere contraseña en cada arranque y el acceso a la interfaz Flask está blindado con 2FA por Telegram.
+
+
+## SECCIÓN 5: HOJA DE RUTA E INTEGRACIÓN DE IA/ML
+
+
+La decisión de no emplear Machine Learning "end-to-end" inicialmente responde a la necesidad de mantener un sistema auditable. En un modelo de caja negra, el diagnóstico es casi imposible; con nuestras reglas actuales, podemos identificar exactamente por qué se tomó o rechazó cada operación. Sin embargo, integraremos IA de forma modular para potenciar el sistema:
+      * Detector de Régimen de Mercado (Supervisado): Un modelo para clasificar el estado del mercado (Tendencia, Lateral, Volátil) y ajustar dinámicamente los pesos del scoring.
+      * Auto-optimización (Meta-learning): Herramienta de optimización estadística que analice el historial propio para sugerir ajustes en los umbrales operativos.
+      * Detección de Anomalías: Identificación de patrones inusuales en volumen o libro de órdenes para anticipar movimientos violentos antes que las reglas estándar.
+      * API de IA Generativa (GPT/Claude/Gemini): Consulta en lenguaje natural dentro de Flask para obtener explicaciones del bot sobre operaciones específicas basadas en logs.
+      * Refuerzo (Reinforcement Learning): Uso exclusivo en simulaciones para descubrir estrategias de salida óptimas que luego se traduzcan a reglas de código verificables.
+
+
+## SECCIÓN 6: PROCEDIMIENTO DE EJECUCIÓN OPERATIVO
+
+
+Se unificará el arranque mediante un archivo main.py que levante simultáneamente la interfaz Flask y el bucle de trading. Desde la UI, se podrán activar o desactivar módulos de forma independiente para realizar pruebas seguras:
+      1. Modo Trading: Activa el loop de ejecución real.
+      2. Modo Backtest: Carga histórica y simulación con resultados visuales.
+      3. Modo Optimizer: Búsqueda automatizada de parámetros ideales.
+      4. Modo News Monitor: Monitoreo activo de impacto fundamental y sentimiento.
+
+
+## SECCIÓN 7: ESTADO DEL PROYECTO
+      * Completado: market_feed.py, indicators.py, scoring.py, live_monitor.py, strategy.py, config.py.
+      * Pendiente: backtest_v3.py (1M), optimizer_v2.py, orders.py, bot.py (loop principal), telegram_bot.py, news_monitor.py, Interfaz Flask, Seguridad (keys.enc).
+      * Integración: Migración de constantes en scoring y strategy hacia la fuente única config.py al finalizar los módulos.
+
+
+---
+Este documento constituye la base lógica sobre la que se construye el sistema. Todo cambio debe ser reflejado aquí para mantener la integridad del bot.
