@@ -1,0 +1,1021 @@
+﻿________________
+Necesito que construyas o actualices el documento de especificaciones técnicas completo del proyecto. El documento debe tener el nivel de detalle suficiente para que cualquier persona pueda reconstruir el código completo de cero solo leyéndolo, sin necesidad de ver el código. Esto significa que cada módulo debe documentar: cada valor numérico concreto (ponderajes, umbrales, porcentajes, factores), cada condición lógica con sus casos y excepciones, cada fórmula matemática, cada función con sus parámetros de entrada y salida, cada comportamiento del sistema ante cada situación posible, cada botón o comando de la interfaz con lo que hace exactamente, y cada decisión de diseño con el motivo por el que se tomó así y no de otra forma. Si algo está pendiente de decidir, marcarlo como pendiente con las opciones consideradas. Nada puede quedar implícito. 
+que el backtest evalúe el sistema como va a funcionar realmente.
+________________
+🟢 Versión 02 del Documento “Technical Specifications & Status Document - Algorithmic Trading Bot - Manual”
+ESPECIFICACIONES TÉCNICAS COMPLETAS
+BOT DE TRADING ALGORÍTMICO — BTC/USDC PERPETUO
+Este documento es la fuente de verdad del proyecto.
+Con esta información sola se puede reconstruir el código completo de cero.
+Cada valor, fórmula, condición, función y decisión de diseño está documentada.
+Las decisiones de diseño incluyen el motivo por el que se tomaron así.
+________________
+
+
+SECCIÓN 1: ENTORNO Y CONEXIÓN
+Par de trading: BTCUSDC (perpetuo de futuros en Binance) Símbolo exacto en la API: BTCUSDC Exchange: Binance Futuros
+URLs:
+* Testnet REST: https://testnet.binancefuture.com
+* Producción REST: https://fapi.binance.com
+* Testnet WebSocket: wss://stream.binancefuture.com
+* Producción WebSocket: wss://fstream.binance.com
+* Stream de precio en tiempo real: wss://stream.binancefuture.com/ws/btcusdc@aggTrade
+Entorno activo: testnet hasta demostrar rentabilidad consistente en backtest e historial de testnet. Migración a producción solo cuando ambas condiciones se cumplan. El entorno es configurable en config.py con un boolean (testnet: True/False).
+Tipo de margen: configurable entre "isolated" y "cross".
+* isolated: la pérdida máxima está limitada al margen asignado a esa posición específica.
+* cross: usa todo el balance como margen — mayor riesgo de liquidación total.
+* Default: isolated. Motivo: más seguro para este sistema porque acota la pérdida máxima por operación.
+* Cambio en vivo desde Flask o terminal sin reiniciar el bot.
+Timeout REST: 10 segundos por request.
+________________
+
+
+SECCIÓN 2: CAPITAL Y COMISIONES
+Capital inicial: 100 USDC. Configurable. Usado en simulaciones y bot inicial. Uso del capital por operación: 100% del capital disponible. Una sola posición abierta a la vez. Motivo: con múltiples posiciones simultáneas el riesgo con apalancamiento se vuelve difícil de controlar.
+Comisiones de Binance Futuros:
+* Maker (órdenes GTX post-only): 0% (0.0000)
+* Taker: 0.05% por lado (0.0005)
+* Peor caso calculado siempre: 0.10% total (taker en ambos lados = 0.0005 × 2 = 0.001) Motivo del peor caso: si ocurre ejecución taker el resultado debe seguir siendo rentable. Nunca calcular con comisión maker porque no está garantizada.
+________________
+
+
+SECCIÓN 3: APALANCAMIENTO POR NIVEL DE SEÑAL
+El apalancamiento no es fijo sino que varía según la calidad de la señal. Motivo: señales fuertes merecen más exposición, señales débiles deben proteger más el capital.
+Nivel 1 (señal fuerte): apalancamiento x5 Nivel 2 (señal moderada): apalancamiento x3 Nivel 3 (señal débil): apalancamiento x2
+Reducción por divergencia macro (1D vs 1W en direcciones opuestas):
+* Multiplicador: 0.6 (60% del nivel correspondiente)
+* N1 con divergencia: x5 × 0.6 = x3
+* N2 con divergencia: x3 × 0.6 = x1.8 → redondeado a x2
+* N3 con divergencia: x2 × 0.6 = x1.2 → redondeado a x1
+* Mínimo absoluto: x1 (nunca por debajo de 1)
+Fórmula de apalancamiento por riesgo: apalancamiento = riesgo_en_usdt / (precio_entrada × distancia_porcentual_al_SL) Donde riesgo_en_usdt = capital × riesgo_por_trade_pct
+Todos los porcentajes de TP y SL se expresan sobre el capital total, no sobre el tamaño de la posición. Motivo: al trader le importa cuánto pierde o gana de su capital real, no del tamaño apalancado.
+________________
+
+
+SECCIÓN 4: MODOS DE OPERACIÓN
+Tres modos que funcionan simultáneamente en el mismo proceso y se evalúan en paralelo cada ciclo. El sistema determina cuál modo tiene más posibilidades en ese momento según el régimen de mercado detectado. Los modos se pueden activar y desactivar individualmente mediante comandos de terminal sin reiniciar el bot.
+Jerarquía de prioridad por default: swing > mediano > scalp. Motivo: el ratio riesgo/beneficio es mejor en timeframes más altos (swing TP 2.5% vs scalp TP 0.6%). La jerarquía es configurable en config.py y modificable desde Flask o terminal con los tres modos de persistencia.
+Comportamiento cuando el modo prioritario no aplica:
+* Si no hay condiciones para swing → evalúa mediano
+* Si no hay condiciones para mediano → evalúa scalp
+* Si no hay señal clara en ningún modo → no opera (espera)
+División de capital opcional:
+* Por default: 100% del capital disponible para el modo que opere
+* Configurable: porcentaje reservado para swing (ej: 70%) y porcentaje para scalp en días laterales (ej: 30%)
+Modo Scalp
+* Timeframe principal: 15 minutos
+* Timeframe de confirmación: 5 minutos
+* TP base aproximado: 0.6% sobre capital
+* SL base aproximado: 0.4% sobre capital
+* Ratio base: 1.5:1
+* Trailing stop distancia: 0.25-0.3% (valor exacto: 0.0027)
+* Trailing stop trigger: se activa cuando el precio avanzó 0.3% desde la entrada (0.0030)
+* Confirmación trailing: velas de 3 minutos confirman soporte
+* Intervalo de evaluación: 60 segundos
+* Pausa por pérdidas consecutivas: 20 velas de 15 minutos = 5 horas
+Modo Mediano
+* Timeframe principal: 1 hora
+* Timeframe de confirmación: 15 minutos
+* TP base aproximado: 1.0% sobre capital
+* SL base aproximado: 0.5% sobre capital
+* Ratio base: 2:1
+* Trailing stop distancia: 0.4-0.5% (valor exacto: 0.0045)
+* Trailing stop trigger: 0.5% de avance (0.0050)
+* Confirmación trailing: velas de 5 o 15 minutos confirman soporte
+* Intervalo de evaluación: 300 segundos (5 minutos)
+* Pausa por pérdidas consecutivas: 20 velas de 1 hora = 20 horas
+Modo Swing
+* Timeframe principal: 4 horas
+* Timeframe de confirmación: 1 hora
+* TP base aproximado: 2.5% sobre capital
+* SL base aproximado: 0.8% sobre capital
+* Ratio base: 3:1
+* Trailing stop distancia: 1-2% (valor exacto: 0.015)
+* Trailing stop trigger: 1.0% de avance (0.010)
+* Confirmación trailing: velas de 15 minutos a 1 hora confirman soporte
+* Intervalo de evaluación: 900 segundos (15 minutos)
+* Pausa por pérdidas consecutivas: 20 velas de 4 horas = 80 horas
+Nota sobre TP y SL: estos valores son aproximados base. El sistema los ajusta dinámicamente en cada operación según EMAs próximas en el camino, niveles de pivote, volatilidad expresada en ATR, y momentum del momento de entrada. Los valores fijos son el punto de partida, no el valor final.
+TP reducido para Nivel 3 (señal débil): 0.15% (0.0015). Máximo 2 intentos fallidos antes de desactivar N3 automáticamente.
+Distribución de los 3 TPs:
+* TP1: 40% del tamaño de posición, al 40% de la distancia al TP base (factor 0.4)
+* TP2: 35% del tamaño de posición, al 70% de la distancia al TP base (factor 0.7)
+* TP3: 25% del tamaño de posición, al 100% de la distancia al TP base (factor 1.0) Los tres TPs se colocan simultáneamente como órdenes limit maker al abrir la posición.
+________________
+
+
+SECCIÓN 5: SISTEMA DE PUNTAJE PONDERADO CONTINUO
+Este es el núcleo del sistema de toma de decisiones. En lugar de condiciones binarias, cada indicador suma puntos gradualmente según su intensidad. Motivo: la realidad del mercado es continua — un RSI en 15 es mucho más significativo que uno en 29, y un sistema que los trata igual desperdicia información valiosa.
+Puntaje máximo teórico: ~143 puntos La entrada se dispara cuando el puntaje total supera un umbral porcentual del máximo.
+Los pesos del scoring son dinámicos según el régimen de mercado detectado (ver Sección 13). En tendencia: pesos estándar descritos abajo. En lateral: RSI extremo y Bollinger Bands tocadas valen más, EMAs alineadas valen menos. En volátil-sin-dirección: umbrales más altos, posiciones más chicas.
+________________
+
+
+RSI — máximo 12 puntos base + 3 puntos momentum + penalizaciones
+El RSI mide el momentum de precio comparando ganancias y pérdidas en un período. Valores extremos indican sobrecompra o sobreventa.
+Para operaciones LONG:
+* RSI < 15: +12 pts (caso extremo muy raro, suele preceder rebotes importantes)
+* RSI < 20: +10 pts
+* RSI < 30: +8 pts
+* RSI entre 30 y 40: +4 pts (zona de recuperación)
+* RSI entre 40 y 50: +1 pt
+Para operaciones SHORT: valores invertidos (RSI > 85, > 80, > 70, entre 60-70, entre 50-60)
+Momentum del RSI: +3 pts si viene bajando desde más de 50 en tres velas consecutivas (para long) o subiendo desde menos de 50 en tres velas consecutivas (para short). Indica que la presión se está agotando.
+Penalizaciones:
+* RSI > 70 sin confirmación macro: -4 pts (puede lateralizar en vez de corregir)
+* RSI > 70 para long: -4 pts (sobrecompra sin respaldo)
+Condición de bloqueo absoluto: si RSI está saturado (>70 o <30) Y las EMAs están completamente alineadas (5 de 5 en la misma dirección) → el bot NO opera. Motivo: el RSI saturado puede mantenerse muchas velas y lateralizar antes de continuar, lo cual es una trampa clásica. Debe confirmarse con tendencia macro antes de considerar entrada.
+En régimen lateral: RSI < 20 o > 80 vale +14 pts (aumentado porque en lateral el rebote desde extremos es la señal principal).
+________________
+
+
+EMAs — máximo 13 puntos base + 4 puntos compresión + penalizaciones
+Las cinco EMAs usadas: 7, 25, 50, 99 y 200 períodos.
+Alineación:
+* 5 de 5 EMAs alineadas en la misma dirección: +10 pts
+* 4 de 5 alineadas: +6 pts
+* 3 de 5 alineadas: +3 pts
+* Menos de 3 alineadas: 0 pts
+Separación creciente entre EMAs (tendencia acelerando): +3 pts adicionales
+Compresión de EMAs (EMA7 y EMA25 separadas menos del 0.1% entre sí): +4 pts SOLO SI el Squeeze Momentum está terminando O el volumen está creciendo simultáneamente. Sin esas condiciones: 0 pts. Motivo: una compresión sola puede explotar hacia cualquier dirección.
+Condición especial — compresión con goteo: Si hay compresión y 2 o más velas goteando hacia un lado:
+* Esperar el cierre de una vela fuera de la compresión antes de operar
+* Si la siguiente vela vuelve hacia las EMAs → evaluar la fuerza del movimiento
+* Si atraviesa con mucha fuerza (>0.8 × ATR) → probable rebote en la EMA
+* Si atraviesa débilmente → puede continuar o lateralizar
+* A mayor grado de compresión, menos velas de goteo necesarias para confirmar (rango más estrecho = cualquier movimiento es más significativo)
+En régimen lateral: EMAs alineadas vale solo +3 pts (reducido porque en lateral la alineación no predice continuación).
+________________
+
+
+MACD — máximo 14 puntos + penalizaciones
+El MACD mide la diferencia entre dos EMAs y su velocidad de cambio. Útil para confirmar momentum, no dominante como indicador único.
+Componentes:
+* Cruce alcista activo (línea MACD cruzando señal hacia arriba): +8 pts
+* Histograma positivo y creciendo: +5 pts
+* Histograma positivo pero achicándose: +2 pts
+* Histograma negativo: 0 pts
+* Cruce bajista activo con posición long: -5 pts
+Divergencia alcista (precio hace mínimos más bajos pero MACD hace mínimos más altos, mirando 10 velas atrás): +6 pts adicionales. Es una señal poderosa de que la bajada está perdiendo fuerza. Divergencia bajista (precio hace máximos más altos pero MACD hace máximos más bajos): -6 pts para long.
+________________
+
+
+UT Bot — máximo 8 puntos + modificadores
+El UT Bot es un trailing stop dinámico basado en ATR que genera señales cuando el precio lo cruza.
+Señal de cruce activa: +8 pts Precio sobre el trailing stop acercándose a menos del 0.2%: +3 pts (confirmación de tendencia)
+Modificador por tendencia macro: Si la señal del UT Bot va CONTRA la tendencia macro → su puntaje se reduce al 50%. Motivo: el UT Bot puede dar señales erróneas en mercados sin tendencia clara. Siempre requerir más indicadores que avalen la señal si va contra tendencia. Esperar ligeramente antes de actuar solo en base al UT Bot.
+________________
+
+
+Squeeze Momentum de LazyBear — máximo 10 puntos + penalizaciones
+Parámetros: key value = 1, ATR period = 10. Mide cuándo las Bandas de Bollinger salen de los Canales de Keltner (squeeze off = mercado comprimido liberando energía).
+Componentes:
+* Squeeze terminando (sqz_off, BB saliendo de KC): +8 pts. Motivo: el mejor momento para entrar — mercado comprimido que acaba de liberar energía.
+* Histograma positivo creciendo: +5 pts
+* Cambio de verde claro a verde oscuro O de rojo claro a rojo oscuro: +3 pts. Indica agotamiento de tendencia o cambio inminente — no en el cruce sino en ese cambio de intensidad.
+* Squeeze activo (mercado comprimido, BB dentro de KC): -3 pts. Indica mercado sin dirección.
+________________
+
+
+Ichimoku — máximo 9 puntos + penalizaciones
+Sistema japonés que muestra soporte, resistencia y tendencia en una sola visualización. Respetado por traders asiáticos e institucionales.
+Componentes:
+* Precio sobre la nube (Kumo): +5 pts
+* Cruce de línea de conversión (Tenkan-sen) sobre línea base (Kijun-sen): +4 pts adicionales
+* Precio dentro de la nube: -2 pts (zona de indecisión)
+* Precio debajo de la nube para long: 0 pts
+________________
+
+
+VWAP — máximo 5 puntos
+El VWAP es el precio promedio ponderado por volumen del día. Es la referencia de precio "justo" para traders institucionales.
+Componentes:
+* Precio sobre VWAP: +3 pts (mercado alcista según institucionales)
+* Precio cruza VWAP al alza en esa misma vela: +5 pts (señal fresca de cambio de sesgo institucional)
+* Precio debajo de VWAP para long: 0 pts
+________________
+
+
+Volumen — máximo 8 puntos + penalizaciones
+El volumen confirma que los movimientos de precio tienen respaldo real. Comparación contra promedio de 20 velas.
+Componentes:
+* Volumen > 2.0× el promedio: +8 pts
+* Volumen > 1.5× el promedio: +5 pts
+* Volumen > 1.2× el promedio: +3 pts
+* Volumen ≤ promedio: -2 pts (movimiento sin volumen puede ser falso)
+________________
+
+
+Bollinger Bands — máximo 6 puntos + penalizaciones
+Miden la volatilidad y la posición relativa del precio en su rango estadístico reciente.
+Para LONG:
+* Precio tocando la banda inferior: +6 pts (estadísticamente el precio tiende a volver al centro)
+* Precio en el tercio inferior: +3 pts
+* Precio sobreextendido por encima de la banda superior: -4 pts (el precio ya viajó demasiado, arriesgado entrar long)
+En régimen lateral: banda inferior o superior tocada vale +8 pts (aumentado porque en lateral el rebote desde bandas es la señal principal).
+________________
+
+
+Tendencia Macro — máximo 15 puntos + penalizaciones
+La confluencia de los timeframes 1W, 1D y 4H es el factor más poderoso del sistema. Los timeframes altos no bloquean la entrada pero ponderan enormemente el puntaje.
+Componentes:
+* 1W + 1D + 4H alineados en la misma dirección: +15 pts
+* Solo 1W + 1D alineados: +10 pts
+* Solo el diario (1D): +4 pts
+* Macro completamente en contra: -8 pts
+Condición especial — divergencia 1D vs 1W: Si 1W y 1D apuntan en direcciones opuestas:
+* Solo se permiten scalps con puntaje alto
+* Apalancamiento reducido al 60% del nivel correspondiente
+* Se requiere 15% más de puntaje que el umbral normal
+* En cualquier momento puede volver a la tendencia macro principal (1W)
+________________
+
+
+Pivotes Estándar Mejorados — máximo 5 puntos
+Calculados con OHLC de la vela anterior. Generan: PP (pivot principal), R1/R2/R3 (resistencias), S1/S2/S3 (soportes).
+Para LONG:
+* Precio rebotando en S1: +5 pts
+* Precio cerca de S2: +4 pts
+* Precio entre PP y S1: +2 pts
+* Precio tocando R1/R2/R3 (resistencia encima para long): penalización según proximidad
+________________
+
+
+Funding Rate — máximo 4 puntos, direccional
+El funding rate en perpetuos se cobra cada 8 horas. Positivo = longs pagan a shorts (mercado muy largo, posible sobreextensión alcista). Negativo = shorts pagan a longs (mercado muy corto, favorable para long).
+Para LONG:
+* Funding < -0.01%: +4 pts (mercado muy corto, favorable para long)
+* Funding < -0.005%: +2 pts
+* Funding > +0.01%: -3 pts (mercado muy largo, posible sobreextensión, además el long paga)
+Para SHORT: valores exactamente inversos.
+Motivo: importante para no entrar long justo antes de que se cobre un funding muy positivo que coma la ganancia.
+________________
+
+
+Order Book Imbalance — máximo 4 puntos
+Diferencia entre el volumen de órdenes de compra y venta en el libro de órdenes en tiempo real.
+Para LONG:
+* Imbalance > 30% hacia compras: +4 pts
+* Imbalance > 15% hacia compras: +2 pts
+* Imbalance > 30% hacia ventas: -2 pts
+Más útil para scalp que para swing porque cambia rápidamente.
+________________
+
+
+Patrones de Velas — máximo 8 pts en scalp, 12 pts en swing
+Se duplica si el patrón coincide con un nivel de soporte o resistencia.
+Patrones y puntos base:
+* Vela envolvente alcista o bajista: 6 pts × peso del timeframe
+* Martillo o estrella fugaz: 5 pts × peso del timeframe
+* Doji en soporte o resistencia: 4 pts × peso del timeframe
+Peso del timeframe:
+* 15 minutos: 1.0
+* 1 hora o más: 1.5 (los patrones son más confiables en TF altos, menos ruido)
+________________
+
+
+Volatilidad Tick a Tick con Velas de 1 Minuto — máximo 6 puntos
+Velas de 1 minuto para mayor precisión en detección de señales en rango y simulación de ejecución de TP y SL.
+* Precio rebotando en rango con volatilidad: +2 a +6 pts según cantidad de rebotes confirmados
+* También se usa para detectar oportunidades de scalp dentro de rangos definidos
+________________
+
+
+CCI — máximo 4 puntos + penalizaciones
+Mide qué tan lejos está el precio de su promedio estadístico.
+* Salida de zona sobreextendida (cruce de ±100): +3 pts
+* CCI > 150 o < -150: +2 pts (señal de impulso)
+* CCI en dirección opuesta a la operación: -2 pts
+________________
+
+
+Estocástico — máximo 4 puntos
+Compara el precio de cierre con el rango de las últimas N velas.
+* Cruce de K sobre D en zona < 20 para long (o > 80 para short): +3 pts
+* Zona extrema sin cruce todavía: +2 pts
+________________
+
+
+Divergencia MACD como Componente Separado — máximo 6 puntos
+Analiza 10 velas atrás. Detecta si el precio hace extremos más extremos pero el MACD no los acompaña. Indica que el movimiento está perdiendo fuerza y viene una reversión. Señal poderosa cuando aparece.
+* Divergencia alcista confirmada: +6 pts para long
+* Divergencia bajista confirmada: -6 pts para long
+________________
+
+
+Score de Lateralización — umbral 0.65
+Evalúa la probabilidad de que el mercado vaya a lateralizar. Si supera 0.65 → el bot no opera a menos que haya confluencia macro muy fuerte.
+Componentes del score de lateralización:
+* Doji en la vela actual: +0.25
+* Mechas largas en ambos lados: +0.20
+* RSI entre 45 y 55: +0.30
+* Máximos y mínimos convergentes en las últimas 5 velas: +0.35
+Motivo: el tipo de velas combinado con RSI neutro y rangos estrechándose son señales claras de mercado indeciso. Entrar ahí tiene alta probabilidad de quedar atrapado.
+________________
+
+
+Confirmación del Timeframe Secundario — máximo 8 puntos bonus
+El timeframe de confirmación (el inmediatamente inferior al principal) debe coincidir con la señal del principal.
+* Señal en el mismo sentido en TF secundario: +8 pts
+* Señal neutra en TF secundario: 0 pts
+* Señal contraria en TF secundario: -5 pts
+________________
+
+
+SECCIÓN 6: UMBRALES DE ENTRADA Y CONDICIONES ADICIONALES
+Puntaje máximo de referencia: 143 puntos
+Nivel 1 (N1): umbral ≥ 57% del máximo = ≥ 81.5 pts
+* Entra siempre cuando supera el umbral
+* Apalancamiento: x5
+* Puede romper una pausa activa (pero NO resetea el contador de pérdidas)
+Nivel 2 (N2): umbral ≥ 45% del máximo = ≥ 64.4 pts
+* Requiere confirmación macro (al menos 1D alineado)
+* Apalancamiento: x3
+Nivel 3 (N3): umbral ≥ 35% del máximo = ≥ 50.1 pts
+* Requiere que 1W y 1D estén muy alineados (15 pts macro completos)
+* Apalancamiento: x2
+* TP reducido: 0.15%
+* Máximo 2 intentos fallidos antes de desactivarse automáticamente
+* Si los 2 intentos fallan → N3 se desactiva hasta medianoche UTC
+Incrementos automáticos de umbral (se suman al umbral base del nivel correspondiente):
+* Apertura Wall Street 13:30 UTC: +10%
+* Cierre de semana viernes 21:00 UTC: +10%
+* Horario sin volumen pero con tendencia fuerte: +5%
+* Cierre de día 23:00 UTC: +5%
+* Noticias de impacto moderado: +15%
+* Divergencia 1D vs 1W: +15%
+Ejemplo: N1 en apertura Wall Street = 57% + 10% = 67% del máximo = ≥ 95.8 pts necesarios.
+________________
+
+
+SECCIÓN 7: RÉGIMEN DE MERCADO
+El detector de régimen determina la estrategia activa, los pesos del scoring, el tamaño de posición y la jerarquía de modos. Es el componente de mayor impacto individual del sistema.
+Cuatro regímenes posibles:
+1. Tendencia alcista fuerte
+2. Tendencia bajista fuerte
+3. Lateral (rango)
+4. Volátil-sin-dirección
+Indicadores usados para la detección:
+EMA 50 y EMA 200 en timeframe diario:
+* Precio sobre ambas EMAs: señal alcista
+* Precio debajo de ambas EMAs: señal bajista
+* Precio entre ambas EMAs: indeterminado
+ADX (Average Directional Index):
+* ADX > 25: tendencia (no importa la dirección)
+* ADX entre 20 y 25: zona de transición
+* ADX < 20: rango / lateral
+Volatility Ratio: Fórmula: ATR_actual / ATR_promedio_20_velas
+* 1.5: expansión de volatilidad (puede ser inicio de tendencia o pánico)
+
+
+* 0.7 a 1.5: volatilidad normal
+* < 0.7: compresión (probable breakout próximo)
+Hurst Exponent: Calculado sobre ventana rodante de 100-200 velas.
+   * < 0.5: el precio tiende a revertir a la media → favorable para mean-reversion y scalp
+   * = 0.5: movimiento aleatorio (sin ventaja estadística)
+   * 0.5: el precio tiende a seguir tendencia → favorable para trend-following y swing Es el indicador más matemáticamente sólido para determinar el régimen.
+
+
+Market Microstructure: Relación entre spread bid/ask y volatilidad.
+      * Spread amplio con baja volatilidad: iliquidez → no operar
+      * Spread ajustado con volatilidad creciente: mercado activo con dirección → operar normalmente
+Fear & Greed Index (dimensión de sentimiento):
+      * FG entre 25 y 75: normal, sin cambios en umbrales
+      * FG entre 15-24 o 76-85: cautela moderada, +15% de umbral requerido
+      * FG entre 10-14 o 86-90: cautela alta, pausa 60 minutos
+      * FG < 10 o > 90: cautela extrema, pausa 4 horas El FG es ortogonal a los indicadores técnicos: puede haber tendencia alcista con FG bajo (inicio de recuperación) o con FG muy alto (posible techo). Se usa como modificador adicional al régimen técnico.
+Tabla de régimen resultante:
+ADX
+	EMAs precio
+	Volatility Ratio
+	Régimen
+	>25
+	Sobre ambas
+	>0.7
+	Tendencia alcista fuerte
+	>25
+	Bajo ambas
+	>0.7
+	Tendencia bajista fuerte
+	<20
+	Cualquier
+	0.7-1.5
+	Lateral
+	>25
+	Cualquier
+	>1.5
+	Volátil-sin-dirección
+	<20
+	Cualquier
+	<0.7
+	Pre-breakout (tratar como lateral hasta confirmación)
+	Comportamiento por régimen:
+Tendencia alcista fuerte:
+      * Priorizar longs, reducir shorts
+      * Modo swing prioritario
+      * Ratio TP/SL: 1:2.5 a 1:3
+      * Riesgo por trade: 1% del capital
+      * Dejar correr más las ganancias (trailing más amplio)
+Tendencia bajista fuerte:
+      * Priorizar shorts, reducir longs
+      * Mismo comportamiento que alcista pero invertido
+Lateral (rango):
+      * Estrategia mean-reversion en lugar de trend-following
+      * Modo scalp o mediano, no swing
+      * Ratio TP/SL: 1:1.5 (targets más conservadores)
+      * Riesgo por trade: 0.5% del capital
+      * RSI extremo y Bollinger Bands tocadas tienen más peso en scoring
+      * EMAs alineadas tienen menos peso en scoring
+Volátil-sin-dirección:
+      * No operar excepto señales N1 con umbral adicional +20%
+      * Riesgo por trade: 0.3% del capital si se opera
+      * Tamaño de posición muy reducido
+________________
+
+
+SECCIÓN 8: GESTIÓN DE ÓRDENES
+Entrada:
+      * Tipo: LIMIT con timeInForce GTX (Post-Only)
+      * GTX garantiza: si la orden no puede ejecutarse como maker es rechazada, nunca ejecutada como taker
+      * Precio de entrada: colocado en el bid actual para long, ask para short
+Lógica de gestión de la orden de entrada:
+      * Si precio sube más del 0.5% sin ejecutar Y indicadores siguen fuertes → buscar nuevo precio de entrada (repricing)
+      * Si precio sube más del 0.5% sin ejecutar Y indicadores se debilitaron → cancelar
+      * Si precio sube entre 0.1% y 0.5% y vuelve → mantener la orden esperando el retesteo
+      * Si lateraliza 2 velas del timeframe principal sin ejecutar Y indicadores ya no son claros → cancelar
+Cierre TP:
+      * Tres órdenes limit maker escalonadas colocadas simultáneamente al abrir la posición
+      * Si el TP no se ejecuta y el precio retrocede → el trailing stop captura la ganancia
+      * Si el precio llega al TP y rebota en vez de romper → el trailing stop apretado captura la ganancia sin cerrar prematuramente si continúa
+Cierre SL:
+      * Tipo: STOP_MARKET (garantiza ejecución antes de llegar a la liquidación)
+      * Lógica inteligente del SL: si la posición está en rojo pero la tendencia sigue fuerte y muchos indicadores siguen alineados → puede mantenerse (el timing puede haber sido malo pero la tendencia es válida)
+      * Si el rojo es profundo Y la tendencia claramente cambió → cerrar a market
+      * Señales de cierre inmediato: EMAs empezaron a cruzar en dirección opuesta O MACD cruzó claramente en contra
+Cierre por señal contraria con posición abierta:
+      1. Intentar cerrar primero con orden limit maker
+      2. Si la orden limit desaparece (precio se fue) O indicadores muestran cambio de tendencia definitivo → cerrar a market
+      3. Si el precio retrocede y los indicadores inmediatos muestran continuidad de la señal contraria → cerrar a market
+      * Timeout para esperar ejecución de limit antes de cerrar a market: 30 segundos
+________________
+
+
+SECCIÓN 9: CIERRE PARCIAL EN EMAs INTERMEDIAS
+El bot identifica la próxima EMA en el camino hacia el TP y evalúa cuántos toques históricos tiene en las últimas 30 velas (fuerza del soporte/resistencia).
+Pesos de las EMAs como soporte/resistencia:
+      * EMA 200: peso 4 (soporte/resistencia muy fuerte)
+      * EMA 99: peso 3
+      * EMA 50: peso 3
+      * EMA 25: peso 2
+      * EMA 7: peso 1 (soporte/resistencia débil)
+Tabla de porcentaje de cierre parcial:
+Fuerza de ruptura
+	Fuerza del soporte
+	% a cerrar
+	Fuerte (>1.0× ATR)
+	Fuerte (4+ toques)
+	30%
+	Fuerte (>1.0× ATR)
+	Débil (<2 toques)
+	15%
+	Moderada (0.5-1.0× ATR)
+	Fuerte
+	50%
+	Moderada
+	Moderada (2-3 toques)
+	35%
+	Moderada
+	Sin soporte
+	20%
+	Débil (<0.5× ATR)
+	Fuerte
+	60%
+	Motivo del mínimo de cierre: siempre cerrar al menos el porcentaje mínimo por si el precio rebota antes de poder reaccionar.
+Acción inmediata al hacer cualquier cierre parcial: Mover el SL al precio de breakeven, calculado como: breakeven = precio_entrada × (1 + comision_taker × 2) para long Garantiza que en el peor caso la operación sale en cero, nunca en pérdida.
+________________
+
+
+SECCIÓN 10: TRAILING STOP
+Activación: no se activa solo por porcentaje de avance. Requiere AMBAS condiciones:
+      1. El precio avanzó el porcentaje de trigger del modo correspondiente
+      2. Las velas del timeframe de confirmación del trailing muestran estructura de soporte
+Timeframes de confirmación del trailing:
+      * Scalp: velas de 3 minutos
+      * Mediano: velas de 5 o 15 minutos
+      * Swing: velas de 15 minutos a 1 hora
+Distancias por modo:
+      * Scalp: 0.25-0.30% (valor exacto usado: 0.0027)
+      * Mediano: 0.40-0.50% (valor exacto: 0.0045)
+      * Swing: 1.0-2.0% (valor exacto: 0.015)
+SL dinámico automático en lateral consolidado con RSI saturado: Especialmente aplicado en swings. El SL sube conforme el precio se aleja usando 1.5× ATR como referencia para no quedar atrapado en una lateralización que consuma la ganancia.
+________________
+
+
+SECCIÓN 11: GESTIÓN DE RIESGO
+Pausas por pérdidas consecutivas (por modo, no global):
+      * 3 pérdidas consecutivas en el mismo modo → pausa de 20 velas del TF principal de ese modo
+      * Scalp: 20 × 15min = 5 horas
+      * Mediano: 20 × 1h = 20 horas
+      * Swing: 20 × 4h = 80 horas
+      * Solo el modo afectado se pausa, los otros siguen operando
+      * Motivo: 3 pérdidas consecutivas indica que el mercado no responde a las señales de ese timeframe
+Pausa global diaria:
+      * 5 pérdidas totales en el mismo día → pausa hasta medianoche UTC (21:00 hora Argentina)
+      * Afecta a todos los modos
+      * Motivo: es señal de que el día completo no es favorable
+Excepción de pausa:
+      * Una señal N1 (≥57% del máximo) puede romper la pausa
+      * NO resetea el contador de pérdidas
+      * Si esa operación de excepción pierde → el contador sigue acumulando normalmente
+Reset de contadores:
+      * Todos los contadores se resetean a medianoche UTC cada día
+Modo revisión (paper trading sin ejecución):
+      * Se activa si el winrate de las últimas 20 operaciones cae por debajo del 38%
+      * Duración: 30 días
+      * Durante este modo el bot sigue calculando indicadores y registrando qué operaciones hubiera hecho, pero no ejecuta ninguna orden real
+      * Al final de los 30 días se revisa si hubiera sido rentable
+      * Si sí → puede volver a operar
+      * Si no → revisar si los indicadores dejaron de funcionar porque el mercado cambió su estructura
+      * El bot envía alerta por Telegram al entrar en modo revisión
+      * Motivo: los mercados evolucionan y los indicadores pueden dejar de funcionar durante meses o permanentemente. Mejor pausar y revisar que seguir perdiendo capital
+Gestión de riesgo dinámica por volatilidad: Fórmula de tamaño de posición: tamaño_posicion = (riesgo_por_trade / distancia_al_stop) × capital
+Donde riesgo_por_trade varía según el régimen:
+      * Tendencia fuerte: 1.0% del capital
+      * Lateral: 0.5% del capital
+      * Volátil-sin-dirección: 0.3% del capital
+Y distancia_al_stop varía según el ATR:
+      * ATR alto (volatility ratio > 1.5): stops más amplios, posición más chica
+      * ATR bajo (volatility ratio < 0.7): stops más ajustados, posición más grande
+      * ATR normal: valores base del modo
+________________
+
+
+SECCIÓN 12: ANÁLISIS MULTI-TIMEFRAME
+Rol de cada timeframe:
+      * 1W y 1D: contexto macro, ponderan enormemente el puntaje (hasta 15 pts de los 143)
+      * 4H y 1H: contexto operativo, confirman la dirección
+      * 15M y 5M: timeframes de entrada, disparan la señal
+Los timeframes altos no bloquean la entrada pero sí la ponderan.
+Proyección de EMAs: Función disponible en el menú que calcula matemáticamente dónde estarán las EMAs en las próximas 3 velas proyectadas según el precio actual. Cada resultado se guarda con timestamp en el log cifrado.
+________________
+
+
+SECCIÓN 13: DETECTOR DE RÉGIMEN DE MERCADO (regime_detector.py)
+Módulo transversal que corre en paralelo. Determina el régimen actual y comunica el resultado a scoring.py y strategy.py en cada ciclo.
+Salida del detector:
+RegimeResult:
+  regime: str  ("bull_trend" | "bear_trend" | "range" | "volatile")
+  confidence: float  (0.0 a 1.0)
+  adx: float
+  hurst: float
+  volatility_ratio: float
+  ema_position: str  ("above_both" | "below_both" | "between")
+  fear_greed: int
+  microstructure_ok: bool
+
+
+Algoritmo de clasificación:
+      1. Calcular ADX sobre TF diario
+      2. Calcular posición del precio respecto a EMA50 y EMA200 diarias
+      3. Calcular volatility_ratio = ATR_actual / ATR_promedio_20_velas
+      4. Calcular Hurst exponent sobre ventana de 100-200 velas
+      5. Evaluar microstructure (spread / volatilidad)
+      6. Obtener Fear & Greed Index (caché de 5 minutos para no spamear la API)
+      7. Combinar señales con pesos y determinar régimen
+Fórmula del Hurst Exponent (método R/S simplificado): Para una ventana de N precios de cierre:
+      1. Calcular retornos logarítmicos: r_i = ln(P_i / P_{i-1})
+      2. Calcular la media de los retornos: mean_r
+      3. Calcular la serie acumulada de desviaciones: Y_i = sum(r_j - mean_r) para j=1 a i
+      4. R = max(Y) - min(Y)
+      5. S = desviación estándar de los retornos
+      6. RS = R/S
+      7. Hurst = ln(RS) / ln(N/2)
+Confianza del régimen:
+      * Todos los indicadores acuerdan: confidence = 0.9+
+      * Mayoría de indicadores acuerdan: confidence = 0.6-0.9
+      * Indicadores divididos: confidence = 0.3-0.6 (tratar como volátil-sin-dirección)
+________________
+
+
+SECCIÓN 14: NOTICIAS Y GEOPOLÍTICA
+Fuentes y frecuencia:
+      * CryptoPanic: requiere token gratuito, noticias cripto con votos de impacto de la comunidad, revisión cada 5 minutos
+      * Alternative.me Fear & Greed Index: sin clave API, valores 0-100, revisión cada 5 minutos
+      * LunarCrush: datos de redes sociales cripto, tier gratuito
+      * RSS CoinTelegraph y CoinDesk: sin clave, revisión cada 5 minutos
+      * Reddit API (r/Bitcoin, r/CryptoMarkets): análisis de sentimiento propio con NLP
+      * Desactivado en backtest (no hay datos históricos de noticias disponibles)
+Lógica de pausa por Fear & Greed:
+      * FG entre 25 y 75: normal, sin cambios
+      * FG entre 15-85 o noticias de impacto moderado: pausa 15 minutos + requiere 15% más de puntaje
+      * FG < 20 o > 80 o noticias de alto impacto: pausa 60 minutos
+      * FG < 10 o > 90 o noticias extremas: pausa 4 horas
+Lógica de pausa por noticias geopolíticas:
+      * BTC reacciona más del 2% de movimiento → pausa 4 horas
+      * BTC reacciona menos del 0.5% → solo +10% más de puntaje requerido
+      * Sin reacción clara → operar con cautela adicional (+5% de umbral)
+________________
+
+
+SECCIÓN 15: SEGURIDAD
+Almacenamiento de claves:
+      * Archivo: keys.enc (en la raíz del proyecto)
+      * Cifrado: AES (Advanced Encryption Standard)
+      * Contenido: API key de Binance, API secret de Binance, token de Telegram, chat_id de Telegram
+      * Las claves se descifran en memoria al arrancar con contraseña del usuario
+      * Nunca aparecen en disco en texto legible
+      * Nunca aparecen en ningún archivo de código visible
+Contraseña maestra:
+      * Se solicita al arrancar el bot
+      * Descifra keys.enc en memoria
+      * Sin la contraseña el bot no puede conectarse a Binance ni a Telegram
+Autenticación de dos factores para Flask:
+      * Al intentar acceder a la interfaz web: ingresar contraseña maestra + código 2FA
+      * El código 2FA se envía al chat de Telegram del usuario
+      * Expiración del código: 300 segundos (5 minutos)
+      * Sin 2FA no se puede acceder a Flask
+Restricción de IP:
+      * Los permisos de la API de Binance se configuran restringidos a la IP específica del servidor
+      * Aunque alguien obtenga las claves, no puede usarlas desde otra IP
+Alertas de acceso:
+      * Cada acceso a la interfaz Flask (incluyendo el propio usuario) genera alerta por Telegram con la IP del que ingresó
+Logs:
+      * Todo el historial y los logs se guardan cifrados en la carpeta historial/
+      * Archivo de log: bot_log.enc
+________________
+
+
+SECCIÓN 16: INTERFAZ Y COMANDOS DE TERMINAL
+Los comandos se escriben en la misma terminal donde corre el bot mientras está ejecutándose. El bot corre y al mismo tiempo escucha lo que se escribe (input no bloqueante).
+Lista de comandos:
+      * h: muestra la lista completa de comandos disponibles
+      * i: informe interactivo — pregunta cuántas operaciones mostrar (5 o 10). Presionando i de nuevo mientras espera cancela la petición
+      * m: muestra todo el último ciclo completo (todos los indicadores, puntajes, decisiones)
+      * p: pausa o reanuda el bot completo (toggle)
+      * p1, p2, p3: pausa o reanuda el modo scalp, mediano o swing individualmente (toggle)
+      * e: entrada manual — el bot verifica las condiciones actuales y ejecuta de forma segura si son favorables
+      * s: salida manual segura de la operación actual sin afectar el estado del bot
+      * 1, 2, 3: activa o desactiva el modo scalp, mediano o swing
+      * on: enciende el bot (si estaba apagado)
+      * off: apaga el bot sin cerrar posiciones abiertas
+      * kill: apaga el bot cerrando todas las posiciones activas a market
+      * q: sale del programa completamente
+Comportamiento de comandos que modifican parámetros: Cuando un comando modifica un parámetro o comportamiento, el sistema pregunta: "¿Cómo guardar este cambio? [1] Solo esta sesión [2] Persistente (sobrevive reinicios) [3] Permanente (modifica el código)" El usuario elige 1, 2 o 3 y el sistema aplica apply_change() con el modo correspondiente.
+________________
+
+
+SECCIÓN 17: INTERFAZ FLASK (web_interface/)
+Acceso: http://127.0.0.1:5000 (solo desde IP local) Autenticación: contraseña maestra + código 2FA por Telegram Levantado: automáticamente al correr main.py, o individualmente
+Paneles de la interfaz:
+      1. Estado del bot: modo activo, capital actual, P&L del día, posición abierta (si hay)
+      2. Puntajes en tiempo real: puntaje actual de los 3 modos con indicador visual de proximidad al umbral
+      3. Indicadores actuales: valores de todos los indicadores en el timeframe principal activo
+      4. Historial de operaciones: tabla con las últimas N operaciones y sus resultados
+      5. Control de parámetros: modificación de cualquier parámetro con las 3 opciones de persistencia
+      6. Control de modos: activar/desactivar cada modo individualmente
+      7. Panel de régimen: régimen de mercado actual con confidence y valores de ADX, Hurst, FG
+Modificación de parámetros desde Flask:
+      * La interfaz pregunta: sección → parámetro → nuevo valor → modo de persistencia
+      * No requiere escribir código
+      * Los 34 parámetros mapeados en config.py están disponibles
+      * Al confirmar se llama cfg.apply_change(param, value, mode)
+      * El cambio se aplica en el próximo ciclo sin reiniciar el bot
+Opciones de persistencia en Flask:
+      * Sesión: el cambio existe mientras el bot corre. Al reiniciar vuelve al valor de config.py
+      * Persistente: se guarda en config_override.json. Sobrevive reinicios. Reversible con botón "Restaurar defaults"
+      * Permanente: modifica config.py directamente. Queda en el código base. Irreversible automáticamente
+Botón "Restaurar defaults": borra config_override.json. Al próximo reinicio se usan los valores de config.py.
+Activación parcial del sistema: Desde Flask se puede iniciar individualmente:
+      * Solo backtest (sin bot en vivo)
+      * Solo optimizer (sin bot en vivo)
+      * Solo live monitor (visualización sin trading)
+      * Bot completo
+Opción avanzada — editor de código: Sección separada que muestra el contenido de cualquier archivo del proyecto y permite insertar, modificar o eliminar líneas. Requiere confirmación doble antes de aplicar cambios. Destinada a usuarios que quieren agregar o quitar funcionalidad sin salir de la interfaz.
+IA generativa integrada: Campo de texto en lenguaje natural. El usuario escribe: "subí el umbral del scalp un poco", "¿por qué no operaste en la última hora?", "pausá los swings hasta mañana". El modelo (Claude API o GPT-4) interpreta la intención, identifica el parámetro, sugiere el valor con justificación, y espera confirmación del usuario antes de ejecutar. Tiene acceso al estado interno del bot en tiempo real.
+Diseño configurable: Colores, orden de paneles, densidad de información — configurable desde la misma interfaz.
+Alertas de acceso: cada ingreso genera notificación por Telegram con la IP.
+________________
+
+
+SECCIÓN 18: TELEGRAM
+Creación del bot: en @BotFather de Telegram (gratuito). Genera un token que se guarda en keys.enc.
+Notificaciones enviadas:
+      * Apertura de operación: timestamp, modo, dirección (long/short), precio de entrada, SL, TP1/TP2/TP3, nivel de señal, apalancamiento, capital usado
+      * Cierre de operación: resultado (TP/SL/TRAIL/MANUAL), precio de salida, PNL en % y en USDC, capital resultante
+      * Activación de pausa: motivo (N pérdidas consecutivas / pérdidas diarias / manual), modo afectado, duración
+      * Señales fuertes detectadas aunque no se operen (N1 con puntaje alto)
+      * Entrada en modo revisión: winrate actual, últimas N operaciones
+      * Alertas de seguridad: IP de cada acceso a Flask
+      * Resumen del optimizer automático (cada 30 días): parámetros actuales vs propuestos, métricas comparadas. Espera aprobación o rechazo del usuario antes de aplicar cambios
+      * Código 2FA para acceso a Flask
+________________
+
+
+SECCIÓN 19: HISTORIAL Y LOGS
+Frecuencia de generación de CSVs: cada 12 horas, a las 00:00 UTC y 12:00 UTC
+Cada operación registra:
+      * Timestamp exacto de entrada y salida
+      * Modo (scalp/mediano/swing)
+      * Dirección (long/short)
+      * Resultado (TP1/TP2/TP3/SL/TRAIL/MANUAL/SEÑAL_CONTRARIA)
+      * Precio de entrada y precio de salida
+      * PNL en porcentaje y en USDC
+      * Capital resultante después de la operación
+      * Nivel de entrada (N1/N2/N3)
+      * Apalancamiento usado
+      * Desglose completo del puntaje: puntos de cada indicador individual
+      * Estado completo del mercado al momento de entrada: precio, todas las EMAs, RSI, MACD, ATR, volumen, funding rate, OBI, régimen de mercado, Fear & Greed
+      * Estado completo del mercado al momento de salida: mismos campos
+      * Cada comando ejecutado en la terminal durante la sesión
+      * Cada cambio de parámetro realizado en Flask o terminal (con modo de persistencia usado)
+      * Cada proyección de EMAs solicitada con su resultado y timestamp
+      * Cada informe generado
+Todo cifrado en historial/bot_log.enc
+________________
+
+
+SECCIÓN 20: BACKTEST (backtest_v3.py)
+Fuente de datos: CSV de velas de 1 minuto (BTCUSDC_1m.csv) Días de historia: 1000 días (~1.44 millones de velas) Primera prueba rápida: 90 días para verificar que el sistema funciona antes del backtest definitivo
+Split de datos:
+      * Train (70%): para correr el backtest y entender el comportamiento de la estrategia
+      * Validación (15%): para probar los parámetros encontrados por el optimizer en un período no visto durante el entrenamiento
+      * Test (15%): guardado intocable hasta el final absoluto. Se usa una única vez, cuando ya se está satisfecho con todo, para medir rendimiento en datos que ni el entrenamiento ni la optimización tocaron. Si test ≈ validación el sistema generaliza bien; si divergen hay overfitting.
+Precisión de simulación: Usa velas de 1 minuto para simular con precisión cuándo se ejecutan el TP y el SL dentro de una vela mayor. Evita el lookahead bias (usar información del futuro que no estaría disponible en tiempo real).
+Métricas calculadas:
+      * Retorno total en % y en USDC
+      * Winrate (porcentaje de operaciones ganadoras)
+      * Profit factor (ganancias brutas / pérdidas brutas)
+      * Sharpe ratio (retorno / volatilidad de retornos)
+      * Máximo drawdown (mayor caída desde un pico)
+      * Promedio de operaciones por día
+      * Desglose por modo (scalp/mediano/swing)
+      * Desglose por nivel de señal (N1/N2/N3)
+      * Desglose por régimen de mercado
+      * Distribución de duración de operaciones
+El detector de régimen está activo en el backtest para que los resultados reflejen cómo funcionará en producción.
+________________
+
+
+SECCIÓN 21: OPTIMIZER (optimizer_v2.py)
+Parámetros a optimizar y sus rangos:
+      * Umbral N1: [0.50, 0.53, 0.55, 0.57, 0.60, 0.63, 0.65]
+      * Umbral N2: [0.38, 0.40, 0.42, 0.45, 0.48, 0.50]
+      * Umbral N3: [0.30, 0.32, 0.35, 0.38, 0.40]
+      * TP scalp: [0.004, 0.005, 0.006, 0.007, 0.008]
+      * SL scalp: [0.003, 0.004, 0.005]
+      * TP mediano: [0.008, 0.010, 0.012, 0.015]
+      * SL mediano: [0.004, 0.005, 0.006]
+      * TP swing: [0.020, 0.025, 0.030]
+      * SL swing: [0.006, 0.008, 0.010]
+Métrica de optimización: configurable entre Sharpe ratio (default), profit factor, retorno total. Mínimo de operaciones para resultado válido: 30 operaciones. Paralelismo: múltiples workers (configurable, default = CPUs disponibles - 1).
+Scheduler automático:
+      * Corre en segundo plano cada 30 días
+      * Compara parámetros nuevos vs parámetros actuales en el set de test reservado
+      * Solo propone cambio si la mejora supera umbral mínimo (default: Sharpe +10%)
+      * Envía resumen por Telegram: parámetros actuales, parámetros propuestos, métricas comparadas
+      * Espera aprobación o rechazo del usuario por Telegram
+      * Si aprobado: aplica cambios con modo "permanent"
+      * Si rechazado: mantiene parámetros actuales, registra en log
+________________
+
+
+SECCIÓN 22: DATOS ALTERNATIVOS Y FUENTES EXTERNAS
+Ya integrado:
+      * Fear & Greed Index (Alternative.me): gratuito, sin clave, valores 0-100
+      * Funding rate (Binance API)
+      * Order book imbalance (Binance API)
+      * CryptoPanic (token gratuito, noticias con votos de impacto)
+Pendiente de integrar (en orden de prioridad):
+      * Open interest de Binance: cuando sube mucho con el precio indica sobreextensión y posible reversión
+      * Delta de volumen vela a vela: volumen comprador - volumen vendedor, captura desequilibrios que el volumen total no muestra
+      * Liquidation heatmap: niveles con acumulaciones de stops que el precio frecuentemente va a buscar
+      * LunarCrush: datos de redes sociales cripto, tier gratuito
+      * Glassnode (tier gratuito): métricas on-chain de BTC — NUPL, SOPR, exchange flows. Muy valioso porque los datos on-chain son únicos de cripto y difícilmente manipulables
+      * CryptoQuant: similar a Glassnode, métricas on-chain
+      * Whale Alert API: movimientos grandes en blockchain, tier gratuito
+      * Reddit API (r/Bitcoin, r/CryptoMarkets): análisis de sentimiento con NLP
+      * FRED (Federal Reserve): tasas de interés, inflación, datos macro de EEUU, completamente gratuito
+      * yfinance: DXY (índice dólar), S&P500, oro — correlaciones con BTC
+________________
+
+
+SECCIÓN 23: COMPONENTES DE IA A IMPLEMENTAR
+IA generativa (Claude API / GPT-4 / Gemini):
+      * En Flask: interacción en lenguaje natural con el bot (modificar parámetros, consultar estado, hacer preguntas)
+      * Para investigación: análisis de patrones estadísticamente significativos en datos históricos
+      * Para monitoreo: agente que revisa logs y detecta comportamientos anómalos
+Clasificación supervisada (scikit-learn):
+      * Clasificador de régimen de mercado: entrenado con datos históricos etiquetados (tendencia/lateral/volátil)
+      * Calibrador de pesos del scoring: aprende qué pesos funcionan mejor en cada régimen
+      * Se entrena una vez que el bot esté en testnet con datos reales
+      * Transparente y manejable
+Detección de anomalías:
+      * Detecta cuando el mercado se comporta de forma inusual respecto al histórico
+      * Activa modo cautela automáticamente ante eventos extremos (cisne negro)
+Optimización de parámetros con ML:
+      * Optuna o Ray Tune como alternativa o complemento al optimizer propio
+      * Más eficiente que grid search para espacios de parámetros grandes
+IA para análisis de sentimiento:
+      * Modelos NLP que procesen noticias y tweets en tiempo real
+      * APIs disponibles con costo bajo o gratuito
+Auto-optimización estadística:
+      * El bot monitorea su propio rendimiento en producción
+      * Detecta clases de operaciones con winrate sistemáticamente bajo
+      * Propone ajuste de pesos o umbrales por Telegram
+      * El usuario aprueba antes de aplicar
+      * No requiere ML — es análisis estadístico con reglas de ajuste
+Reinforcement learning (futuro):
+      * El bot aprende por ensayo y error
+      * Requiere simulación de mercado muy precisa
+      * Para implementar después de tener el bot base funcionando bien
+Series temporales LSTM/Transformer (futuro):
+      * Predicción de precio
+      * Resultados mixtos en producción real
+      * Evaluar con datos propios antes de integrar
+Lo que la IA no puede reemplazar: juicio humano en situaciones sin precedente (cisne negro tipo COVID marzo 2020), infraestructura física (co-location, latencia baja), compliance legal.
+________________
+
+
+SECCIÓN 24: ESTRATEGIAS DE TRADING ACTIVAS
+El bot implementa cuatro estrategias y el detector de régimen determina cuál usar:
+1. Trend following con filtros (modo swing y mediano en tendencia):
+      * Sigue la tendencia confirmada por múltiples timeframes
+      * Funciona en mercados con dirección clara
+      * Ratio TP/SL: 1:2.5 a 1:3
+      * Señales principales: EMAs alineadas, MACD, Tendencia Macro, Ichimoku
+2. Mean reversion en rango (modo scalp y mediano en lateral):
+      * El precio tiende a volver al centro del rango después de tocar los extremos
+      * Funciona en mercado lateral con rango definido
+      * Ratio TP/SL: 1:1.5
+      * Señales principales: RSI extremo, Bollinger Bands tocadas, Pivotes, Score de lateralización bajo
+3. Breakout (Squeeze Momentum terminando, cualquier modo):
+      * El mercado estaba comprimido y acaba de liberar energía
+      * El Squeeze off (BB saliendo de KC) es la señal principal de entrada
+      * Ratio TP/SL: variable según la fuerza del breakout
+      * Señales principales: Squeeze Momentum, compresión de EMAs con volumen creciendo
+4. Scalping con edge (modo scalp con señal clara):
+      * Solo cuando hay ventaja estadística identificada (N1 o N2 con señal clara)
+      * No scalping puro sin edge — las comisiones eliminan cualquier ganancia marginal
+      * Ratio TP/SL: 1:1.5
+________________
+
+
+SECCIÓN 25: ARQUITECTURA DEL SISTEMA
+Capa vertical secuencial (flujo principal de cada ciclo):
+market_feed.py      → MarketSnapshot (OHLCV todos los TF)
+        ↓
+indicators.py       → IndicatorValues (todos los indicadores calculados)
+        ↓
+regime_detector.py  → RegimeResult (régimen actual + confidence)
+        ↓
+scoring.py          → ScoreResult (puntaje total + breakdown + nivel)
+        ↓
+strategy.py         → Decision (action, size, sl, tp, leverage)
+        ↓
+orders.py           → OrderResult (confirmación de ejecución en Binance)
+
+
+Capa transversal (corre en paralelo a todas las demás en cada ciclo):
+      * risk_manager.py: puede bloquear cualquier capa. Maneja pausas, contadores, drawdown, modo revisión
+      * logger.py: registra todo cifrado
+      * news_monitor.py: puede pausar cualquier capa según impacto de noticias o Fear & Greed
+      * telegram_bot.py: notificaciones y aprobaciones del usuario
+Punto de entrada único: python main.py Levanta todo el sistema. Desde Flask se pueden activar partes individuales (solo backtest, solo optimizer, solo live monitor).
+________________
+
+
+SECCIÓN 26: ESTADO ACTUAL Y FLUJO DE PRODUCCIÓN
+Módulos completados:
+      * market_feed.py ✅
+      * indicators.py ✅
+      * scoring.py ✅
+      * strategy.py ✅
+      * live_monitor.py ✅
+      * config.py ✅
+Módulos pendientes de construir:
+      * regime_detector.py (construir antes del backtest — el backtest debe testear el sistema completo)
+      * backtest_v3.py
+      * optimizer_v2.py
+      * orders.py
+      * bot.py
+      * telegram_bot.py
+      * news_monitor.py
+      * risk_manager.py (separar de strategy.py)
+      * logger.py
+      * main.py (punto de entrada único)
+      * web_interface/ (Flask)
+      * Sistema de seguridad (keys.enc + módulo de cifrado)
+      * ml_components.py (después de testnet)
+Integración pendiente en módulos ya construidos:
+      * scoring.py: reemplazar THRESHOLDS, LEVERAGE_BY_LEVEL, TP_SL_BY_MODE, THRESHOLD_INCREMENTS, MODE_TIMEFRAMES por referencias a cfg
+      * strategy.py: reemplazar SL_BASE_PCT, TP_BASE_PCT, TRAILING_DISTANCE, TRAILING_TRIGGER por referencias a cfg. Agregar jerarquía de modos y gestión de riesgo dinámica
+      * market_feed.py: reemplazar URLs, símbolo, CANDLES_TO_LOAD y refresh_every por referencias a cfg. Agregar actualización incremental del CSV
+      * indicators.py: reemplazar constantes hardcodeadas por referencias a cfg. Agregar ADX, Hurst exponent, volatility ratio y market microstructure
+Flujo de producción:
+      1. Construir regime_detector.py
+      2. Descargar CSV histórico (1000 días de velas 1m — solo la primera vez)
+      3. Construir backtest_v3.py y correr prueba rápida (90 días)
+      4. Construir optimizer_v2.py y encontrar parámetros óptimos
+      5. Actualizar config.py con parámetros óptimos, segundo backtest para confirmar
+      6. Construir módulos de ejecución (orders.py, bot.py, risk_manager.py, logger.py)
+      7. Integrar cfg en módulos ya construidos
+      8. Configurar Telegram y seguridad
+      9. Construir Flask (web_interface/)
+      10. Ejecutar en testnet varios días con monitoreo
+      11. Si testnet ≈ backtest → migrar a producción con capital pequeño
+      12. Escalar gradualmente
+      13. Integrar ML acotado (clasificador de régimen, calibración de pesos) con datos reales de producción
+      14. Conectar TradingView via webhooks → nuevo backtest → nuevo testnet → producción
+Nota sobre pandas: en sesiones anteriores hubo conflicto de versiones de pandas con Python. Resuelto usando versión compatible. Documentar versión exacta en requirements.txt antes de producción.
+________________
+
+
+SECCIÓN 27: GLOSARIO DE TÉRMINOS Y ABREVIACIONES
+Este glosario explica todos los términos técnicos que aparecen en este documento. Está organizado alfabéticamente. Alguien sin conocimientos de cripto, trading o programación debe poder entender el sistema leyendo este glosario primero.
+________________
+
+
+ADX (Average Directional Index): Indicador que mide la FUERZA de una tendencia en el mercado, en una escala de 0 a 100. No dice si la tendencia es hacia arriba o hacia abajo — solo si existe una tendencia fuerte o no. ADX > 25 = hay tendencia. ADX < 20 = el mercado está sin dirección clara (lateral). Creado por J. Welles Wilder en 1978.
+API (Application Programming Interface): Sistema que permite que dos programas de computadora se comuniquen entre sí. En este caso, el bot usa la API de Binance para enviar órdenes de compra/venta y recibir información del mercado sin necesidad de abrir el sitio web manualmente.
+API Key / API Secret: Par de códigos secretos que genera Binance para cada cuenta. Funcionan como usuario y contraseña para que el bot pueda operar en tu cuenta de forma programática. Deben guardarse con máxima seguridad.
+AES (Advanced Encryption Standard): Algoritmo matemático de cifrado estándar internacional. Se usa para guardar las claves API en el archivo keys.enc de forma que nadie que acceda al archivo pueda leerlas sin la contraseña.
+ATR (Average True Range): Indicador que mide la VOLATILIDAD del mercado calculando el rango promedio de movimiento de precio en las últimas N velas. Si el ATR es alto, el precio se mueve mucho. Si es bajo, el precio está quieto. Se usa para ajustar dinámicamente los stops y el tamaño de posición.
+Apalancamiento (Leverage): Amplificador de posición. Con x5 de apalancamiento y 100 USDC, el bot controla una posición de 500 USDC. Tanto las ganancias como las pérdidas se multiplican por 5. Si el precio cae 20%, se pierde el 100% del capital (liquidación).
+Backtest: Proceso de probar una estrategia de trading sobre datos históricos para ver cómo hubiera funcionado en el pasado. No garantiza resultados futuros, pero es la forma de validar que la lógica tiene sentido antes de arriesgar dinero real.
+Banda de Bollinger (Bollinger Band): Indicador que dibuja un canal alrededor del precio usando la desviación estándar. La banda superior e inferior marcan los extremos estadísticos. Cuando el precio toca la banda inferior, estadísticamente tiende a volver al centro. Creado por John Bollinger.
+Bear / Bajista: Mercado en caída o con tendencia descendente. Un "bear market" es un mercado en tendencia bajista prolongada.
+Bid / Ask: Bid es el precio al que alguien quiere COMPRAR. Ask es el precio al que alguien quiere VENDER. La diferencia entre ambos se llama "spread". En órdenes GTX, el bot intenta ejecutar como maker comprando al bid o vendiendo al ask.
+Bot: Programa de computadora que ejecuta acciones automáticamente, sin intervención humana. En este contexto, un bot de trading opera compras y ventas de criptomonedas según reglas predefinidas.
+Breakeven: Punto de equilibrio. En este sistema, cuando el bot cierra parcialmente una posición, mueve el Stop Loss al precio exacto donde la operación ni gana ni pierde (incluyendo las comisiones).
+Breakout: Cuando el precio "rompe" un rango o nivel de resistencia/soporte después de haber estado comprimido. El Squeeze Momentum detecta este momento.
+Bull / Alcista: Mercado en subida o con tendencia ascendente. Un "bull market" es un mercado en tendencia alcista prolongada.
+Capital: El dinero disponible para operar. En este sistema empieza con 100 USDC. Todo el capital se usa en una única posición a la vez.
+CCI (Commodity Channel Index): Indicador que mide qué tan lejos está el precio de su promedio estadístico. Valores por encima de +100 indican sobrecompra, por debajo de -100 indican sobreventa.
+Cifrado: Proceso matemático que convierte información legible en información ilegible sin la contraseña correcta. El bot cifra las claves API y los logs para proteger la seguridad.
+Cierre parcial: Cerrar solo una parte de la posición abierta (ej: 30% de lo comprado) cuando el precio llega a un nivel de resistencia, en vez de cerrar todo. El resto sigue abierto esperando que el precio suba más.
+Confluencia macro: Cuando los timeframes más altos (1W, 1D, 4H) todos indican la misma dirección. Es la señal más poderosa del sistema: cuando el contexto de largo plazo acompaña la entrada.
+CSV (Comma-Separated Values): Formato de archivo de texto donde los datos están separados por comas. Se usa para guardar el historial de operaciones y los datos de precio históricos.
+Delta de volumen: Diferencia entre el volumen de velas compradoras y vendedoras en un período. Captura quién tiene más presión en el mercado en este momento.
+Divergencia (MACD): Cuando el precio y el indicador se mueven en direcciones opuestas. Ej: el precio hace mínimos más bajos pero el MACD hace mínimos más altos. Indica que la tendencia está perdiendo fuerza y puede revertirse.
+Drawdown: La caída máxima del capital desde un pico hasta el valle siguiente. Si el capital llegó a 150 USDC y luego cayó a 120 USDC, el drawdown fue de 20%.
+EMA (Exponential Moving Average): Promedio móvil que le da más peso a los precios recientes. Más reactiva que la SMA. Se usa en períodos de 7, 25, 50, 99 y 200 en este sistema. Cuando las EMAs están alineadas en la misma dirección, confirman la tendencia.
+Estocástico (Stochastic): Indicador que compara el precio de cierre actual con el rango de precios de las últimas N velas. Valores menores a 20 indican sobreventa, mayores a 80 indican sobrecompra.
+Fear & Greed Index: Índice de 0 a 100 que mide el sentimiento del mercado cripto. 0 = miedo extremo (la gente quiere vender todo). 100 = avaricia extrema (la gente quiere comprar todo). Provisto por Alternative.me, gratuito.
+Flask: Librería de Python para crear interfaces web. En este proyecto se usa para la interfaz de control del bot que se abre en el browser.
+Funding Rate: Tasa que se cobra cada 8 horas en los contratos perpetuos. Si es positiva, los que tienen posiciones largas (compradores) le pagan a los que tienen posiciones cortas. Si es negativa, al revés. Indica el desequilibrio de sentimiento entre compradores y vendedores.
+Futuros perpetuos: Contrato financiero que permite apostar a que el precio de BTC va a subir (long) o bajar (short) sin fecha de vencimiento. Diferente a los futuros tradicionales que vencen en una fecha fija.
+GTX (Good Till Crossing): Tipo de instrucción para una orden. Significa "Post-Only": la orden solo se ejecuta si puede hacerlo como maker (en el libro de órdenes). Si el mercado la ejecutaría como taker, se cancela automáticamente. Garantiza pagar 0% de comisión maker.
+Hardcodeado: Cuando un valor (número, texto) está escrito directamente en el código en vez de leerse desde un archivo de configuración. Es un problema porque para cambiarlo hay que editar el código.
+Hurst Exponent: Medida matemática que determina si una serie de precios tiende a seguir en la misma dirección (valor > 0.5) o a revertir hacia el promedio (valor < 0.5). Calculado con el método R/S (Rescaled Range). Es el indicador estadístico más sólido para detectar el régimen de mercado.
+Ichimoku: Sistema de análisis técnico japonés que muestra soporte, resistencia y tendencia usando cinco líneas y una "nube" en un solo gráfico. Muy respetado por traders institucionales asiáticos.
+JSON: Formato de texto estándar para guardar datos estructurados. Se usa en este proyecto para config_override.json y risk_state.json.
+Latencia: El tiempo que tarda en ejecutarse una orden desde que el bot la envía hasta que Binance la procesa. Baja latencia = más rápido. Importante en scalping.
+Liquidación: Cuando el mercado se mueve tanto en contra de la posición que Binance cierra la posición automáticamente para que el trader no deba más de lo que tiene. Con apalancamiento x5, una caída del 20% liquida la posición.
+Long / Compra: Apostar a que el precio va a SUBIR. Se "compra" el contrato esperando venderlo más caro.
+MACD (Moving Average Convergence Divergence): Indicador que mide la diferencia entre dos EMAs (generalmente de 12 y 26 períodos) y su velocidad de cambio. Útil para confirmar momentum y detectar divergencias.
+Maker / Taker: Maker es quien AGREGA liquidez al mercado colocando una orden en el libro de órdenes que nadie toma inmediatamente. Paga 0% de comisión en Binance Futuros. Taker es quien SACA liquidez ejecutando una orden que ya existe en el libro. Paga 0.05% de comisión.
+Margen aislado / cruzado: Tipos de margen en futuros. Aislado: solo el margen asignado a esa posición puede perderse. Cruzado: todo el balance de la cuenta puede usarse como margen (más riesgo).
+Mean Reversion: Estrategia que asume que el precio tiende a volver a su promedio después de alejarse demasiado. Se usa en mercados laterales.
+ML (Machine Learning): Subcampo de la inteligencia artificial donde los algoritmos aprenden patrones de datos históricos sin ser programados explicitamente. En este proyecto se aplica de forma acotada para clasificación de régimen y calibración de pesos.
+Modo revisión / Paper trading: Estado del bot donde sigue calculando todo y registrando qué operaciones hubiera hecho, pero NO ejecuta ninguna orden real. Usado cuando el winrate cae demasiado, para detectar si la estrategia dejó de funcionar sin seguir perdiendo dinero.
+Momentum: La velocidad y fuerza con que se mueve el precio en una dirección. Un mercado con alto momentum tiende a seguir moviéndose en esa dirección.
+NLP (Natural Language Processing): Rama de la IA que permite a las computadoras entender y procesar texto en lenguaje humano. Se usa para analizar noticias y sentimiento.
+OHLCV: Open, High, Low, Close, Volume. Los cinco datos fundamentales de una vela: precio de apertura, máximo, mínimo, cierre, y volumen. Son la materia prima de todos los indicadores.
+Open Interest: La cantidad total de contratos de futuros abiertos en el mercado en un momento dado. Cuando sube mucho junto con el precio, puede indicar sobreextensión.
+Optimizer: Programa que prueba automáticamente muchas combinaciones de parámetros para encontrar cuál funcionó mejor en el backtest.
+Overfitting: Cuando un sistema se "memoriza" los datos históricos en vez de aprender patrones generalizables. El resultado es excelente en el backtest pero malo en trading real.
+Par de trading: La combinación de dos activos que se intercambian. BTCUSDC significa que se compra/vende Bitcoin con USDC.
+Perpetuo: Ver "Futuros perpetuos".
+Pivotes (Pivot Points): Niveles de precio calculados matemáticamente a partir del OHLC de la vela anterior. Generan zonas de soporte (S1, S2, S3) y resistencia (R1, R2, R3) que el mercado suele respetar.
+PNL (Profit and Loss): Ganancia o pérdida de una operación, expresada en USDC y/o porcentaje.
+Post-Only: Ver "GTX".
+Profit Factor: Métricas de rentabilidad: ganancias brutas totales dividido por pérdidas brutas totales. Un profit factor > 1.5 es bueno. > 2.0 es excelente.
+Régimen de mercado: El estado general del mercado en un momento dado: tendencia alcista, tendencia bajista, lateral, o volátil sin dirección. Cada régimen requiere una estrategia diferente.
+Resistencia: Nivel de precio donde históricamente el precio ha encontrado vendedores y ha rebotado hacia abajo. Zona donde es más difícil que el precio siga subiendo.
+RSI (Relative Strength Index): Indicador que mide el momentum comparando las ganancias y pérdidas de los últimos N períodos. Valor de 0 a 100. < 30 = sobreventa. > 70 = sobrecompra. Desarrollado por Welles Wilder.
+Scalp / Scalping: Estrategia que busca ganancias pequeñas y rápidas en timeframes cortos (minutos). Alta frecuencia, stops ajustados, targets pequeños.
+Scoring (puntaje ponderado): Sistema donde cada indicador suma puntos según su intensidad, y el total determina si hay señal de entrada. Es el corazón de la toma de decisiones del bot.
+Sharpe Ratio: Métrica que compara el retorno de una inversión con su volatilidad. Un Sharpe > 1 es bueno, > 2 es excelente. Mide la "calidad" de los retornos, no solo su magnitud.
+Short / Venta: Apostar a que el precio va a BAJAR. Se "vende" un contrato que no se posee, esperando comprarlo más barato después.
+Soporte: Nivel de precio donde históricamente el precio ha encontrado compradores y ha rebotado hacia arriba. Zona donde el precio tiende a detenerse antes de seguir cayendo.
+Spread: Diferencia entre el precio bid (compra) y ask (venta). Un spread alto indica poca liquidez en el mercado.
+Squeeze Momentum (LazyBear): Indicador que detecta cuándo el mercado está "comprimido" (sin dirección, con baja volatilidad) y cuándo esa compresión se libera (breakout). La liberación del squeeze es una de las mejores señales de entrada del sistema.
+SL (Stop Loss): Orden que cierra automáticamente una posición cuando el precio llega a un nivel de pérdida máxima definido. Protege al trader de pérdidas mayores.
+SMA (Simple Moving Average): Promedio de los últimos N precios de cierre, con el mismo peso para todos.
+STOP_MARKET: Tipo de orden de cierre que se ejecuta a precio de mercado cuando el precio toca el nivel de stop. Garantiza ejecución pero no garantiza el precio exacto. Se usa para el SL porque la prioridad es ejecutar, no el precio exacto.
+Swing trading: Estrategia que busca capturar movimientos de varios días o semanas. Timeframes de 4 horas o más. Stops más amplios, targets más grandes.
+Testnet: Entorno de prueba de Binance donde se puede operar con dinero ficticio. Igual que la producción en código y comportamiento, pero sin dinero real. Se usa para validar el bot antes de arriesgar capital.
+Timeframe (TF): El período de tiempo que representa cada vela en un gráfico. 1m = cada vela es 1 minuto. 1h = cada vela es 1 hora. 4h = cada vela es 4 horas. Los timeframes altos (1D, 1W) muestran el panorama macro; los bajos (5m, 15m) muestran la entrada puntual.
+TP (Take Profit): Orden que cierra automáticamente una posición cuando el precio llega a un nivel de ganancia objetivo. El bot coloca tres TPs escalonados simultáneamente.
+Trailing Stop: Stop Loss dinámico que sigue al precio cuando este se mueve a favor de la posición. Si el precio sube y luego baja, el trailing stop captura la ganancia sin necesidad de cerrar prematuramente.
+Trend Following: Estrategia que sigue la dirección de la tendencia establecida en vez de intentar predecir reversiones.
+UT Bot: Indicador técnico basado en ATR que funciona como un trailing stop dinámico. Genera señales cuando el precio cruza su nivel de stop. Nombre completo: UT Bot Alert.
+USDC: Stablecoin (moneda estable) anclada al dólar americano. 1 USDC = 1 USD. Se usa como capital base del bot porque no fluctúa como BTC.
+Vela (Candlestick): Representación gráfica del movimiento del precio en un período. Tiene cuerpo (entre apertura y cierre) y mechas (máximo y mínimo del período). Las velas verdes/blancas indican que el precio subió en ese período; las rojas/negras que bajó.
+Volatility Ratio: ATR actual dividido por el ATR promedio de los últimos 20 períodos. Mayor a 1.5 indica expansión de volatilidad (mercado moviéndose más de lo normal). Menor a 0.7 indica compresión (mercado quieto, posible breakout próximo).
+VWAP (Volume Weighted Average Price): Precio promedio ponderado por volumen del día. Es la referencia de "precio justo" que usan los traders institucionales. Cuando el precio está sobre el VWAP, los institucionales están en modo alcista.
+WebSocket: Protocolo de comunicación que mantiene una conexión abierta y persistente entre el bot y Binance para recibir actualizaciones de precio en tiempo real, sin tener que consultar (hacer "polling") repetidamente.
+Winrate: Porcentaje de operaciones que resultan ganadoras. Un winrate del 50% significa que la mitad de las operaciones ganan. No es suficiente por sí solo — el winrate debe combinarse con el ratio TP/SL para determinar si el sistema es rentable.
+1W / 1D / 4H / 1H / 15M / 5M / 1M: Abreviaciones de timeframes. W = semana, D = día, H = hora, M = minuto.
+2FA (Two Factor Authentication): Autenticación de dos factores. Requiere dos formas de verificación para acceder: la contraseña maestra y un código enviado por Telegram. Hace prácticamente imposible el acceso no autorizado aunque alguien robe la contraseña.
